@@ -5,6 +5,7 @@ from pathlib import Path
 import typer
 
 from n8n_transcriper.reader import WorkflowError, read_workflow
+from n8n_transcriper.generator import generate_project
 
 app = typer.Typer(help="Инструменты для преобразования workflow n8n в Python.")
 
@@ -12,6 +13,20 @@ app = typer.Typer(help="Инструменты для преобразовани
 @app.callback()
 def main() -> None:
     """Работа с workflow n8n."""
+
+
+@app.command()
+def convert(
+    workflow: Path = typer.Argument(help="Путь к JSON-файлу workflow."),
+    out: Path = typer.Option(..., "--out", help="Пустая папка для сгенерированного проекта."),
+) -> None:
+    """Преобразовать поддерживаемый workflow в проект Python."""
+    try:
+        generate_project(read_workflow(workflow), out)
+    except (WorkflowError, OSError) as exc:
+        typer.echo(f"Ошибка: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"Проект создан: {out}")
 
 
 @app.command()
