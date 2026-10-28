@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from reader import WorkflowError, read_workflow, validate_workflow
+from n8n_transcriper.reader import WorkflowError, read_workflow, validate_workflow
 
 
 def test_reads_example_without_losing_data():
