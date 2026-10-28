@@ -63,6 +63,21 @@ def test_merge_rejected(tmp_path):
         generate_project(workflow, tmp_path / "output")
 
 
+def test_merge_append_joins_selected_conditional_outputs(tmp_path):
+    node = {"id": "if", "name": "IF", "type": "n8n-nodes-base.if", "typeVersion": 2.2,
+            "parameters": {"conditions": condition("yes"), "options": {}}}
+    merge = {"id": "merge", "name": "Join", "type": "n8n-nodes-base.merge", "typeVersion": 3,
+             "parameters": {"mode": "append", "numberInputs": 2}}
+    workflow = {"nodes": [node, merge], "connections": {
+        "IF": {"main": [[{"node": "Join", "type": "main", "index": 0}],
+                         [{"node": "Join", "type": "main", "index": 1}]]}}}
+    output = tmp_path / "output"
+    generate_project(workflow, output)
+    result = execute(output, [{"json": {"status": "yes"}}, {"json": {"status": "no"}}])
+    assert sorted(item["json"]["status"] for item in result) == ["no", "yes"]
+    assert execute(output, [{"json": {"status": "yes"}}]) == [{"json": {"status": "yes"}}]
+
+
 def test_unselected_branch_is_never_executed(tmp_path):
     node = {"id": "if", "name": "IF", "type": "n8n-nodes-base.if", "parameters": {"conditions": condition(True, "true", "boolean")}}
     fails = code_node("Bad", "bad")

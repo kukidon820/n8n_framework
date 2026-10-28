@@ -189,8 +189,9 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             source, input_count = generate_merge_node(node, function)
             if [edge.input for edge in parents[name]] != list(range(input_count)):
                 raise WorkflowError(f"Узел {name}: Merge требует по одному соединению на каждый вход")
-            if any(nodes[ancestor]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} for ancestor in ancestors[name]):
-                raise WorkflowError(f"Узел {name}: Merge после условных ветвей пока не поддерживается")
+            conditional_merge = any(nodes[ancestor]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} for ancestor in ancestors[name])
+            if conditional_merge and node.get("parameters", {}).get("mode", "append") != "append":
+                raise WorkflowError(f"Узел {name}: после условных ветвей поддерживается только Merge Append")
             arguments = "merge_inputs"
         elif kind == "@n8n/n8n-nodes-langchain.agent":
             if name not in models:
@@ -232,7 +233,11 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             include_unpaired = isinstance(merge_options, dict) and merge_options.get("includeUnpaired", False)
             merge_params = node.get("parameters", {})
             outer_join = merge_params.get("mode") == "combine" and merge_params.get("combineBy", "combineByFields") == "combineByFields" and merge_params.get("joinMode", "keepMatches") != "keepMatches"
-            ready = ("any(merge_inputs)" if include_unpaired or outer_join else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
+            conditional_merge = kind == "n8n-nodes-base.merge" and any(
+                nodes[ancestor]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}
+                for ancestor in ancestors[name]
+            )
+            ready = ("any(merge_inputs)" if include_unpaired or outer_join or conditional_merge else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
             calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", f"    if {ready}:",
                           f"        logging.info({(name + ': started')!r})"])
             if node.get("executeOnce", False):
