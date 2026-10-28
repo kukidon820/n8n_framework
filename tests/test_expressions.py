@@ -36,3 +36,12 @@ def test_real_prompt_and_gmail_body():
     body = compile_expression(nodes["HTTP - Send email with ZIP"]["parameters"]["jsonBody"], node="Gmail", parameter="jsonBody")
     exec("def body(item):\n    return " + body.code, namespace)
     assert json.loads(namespace["body"]({"json": {"raw": "abc"}})) == {"raw": "abc"}
+
+
+def test_strict_boolean_expression_distinguishes_numbers_and_strings():
+    result = compile_expression("={{ $json.check === true }}", node="IF", parameter="condition")
+    namespace = {}
+    exec("def check(item):\n    return " + result.code, namespace)
+    assert namespace["check"]({"json": {"check": True}}) is True
+    assert namespace["check"]({"json": {"check": 1}}) is False
+    assert namespace["check"]({"json": {"check": "true"}}) is False
