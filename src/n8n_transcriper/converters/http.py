@@ -13,12 +13,16 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
         raise WorkflowError(f"Узел {name}: некорректное имя функции")
     p = node.get("parameters", {})
-    allowed = {"method", "url", "options", "authentication", "sendQuery", "queryParameters", "sendHeaders", "headerParameters"}
+    allowed = {"method", "url", "options", "authentication", "nodeCredentialType", "sendQuery", "queryParameters", "sendHeaders", "headerParameters", "sendBody", "specifyBody", "jsonBody"}
     unknown = set(p) - allowed
     if unknown:
         raise WorkflowError(f"Узел {name}: неподдерживаемые HTTP-параметры: {', '.join(sorted(unknown))}")
-    if p.get("authentication", "none") != "none":
+    auth = p.get("authentication", "none")
+    gmail = auth == "predefinedCredentialType" and p.get("nodeCredentialType") == "gmailOAuth2"
+    if auth != "none" and not gmail:
         raise WorkflowError(f"Узел {name}: HTTP-аутентификация пока не поддерживается")
+    if auth == "none" and "nodeCredentialType" in p:
+        raise WorkflowError(f"Узел {name}: задан тип неиспользуемой авторизации")
     url = p.get("url")
     if not isinstance(url, str) or not url:
         raise WorkflowError(f"Узел {name}: требуется URL")
@@ -62,12 +66,39 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         for pair in group["parameters"]:
             if not isinstance(pair, dict) or set(pair) != {"name", "value"} or not isinstance(pair["name"], str):
                 raise WorkflowError(f"Узел {name}: некорректный элемент {field}")
+            if field == "headerParameters" and pair["name"].lower() in {"authorization", "proxy-authorization", "x-api-key", "cookie"}:
+                raise WorkflowError(f"Узел {name}: секретный заголовок {pair['name']!r} требует отдельной поддержки credentials")
             entries.append(f"{pair['name']!r}: {expression(pair['value'], field)}")
         return "{" + ", ".join(entries) + "}"
 
     params = pairs("sendQuery", "queryParameters")
     headers = pairs("sendHeaders", "headerParameters")
     url_code = expression(url, "url")
+    body = ""
+    if p.get("sendBody", False):
+        if p.get("specifyBody") != "json" or not isinstance(p.get("jsonBody"), str):
+            raise WorkflowError(f"Узел {name}: поддерживается только JSON body")
+        body_code = expression(p["jsonBody"], "jsonBody")
+        body = f'''        body = {body_code}
+        if not isinstance(body, str):
+            raise TypeError("JSON body должен быть строкой")
+        json.loads(body)
+        if not any(key.lower() == "content-type" for key in headers):
+            headers["Content-Type"] = "application/json"
+'''
+    elif "jsonBody" in p or "specifyBody" in p:
+        raise WorkflowError(f"Узел {name}: тело запроса задано без sendBody")
+    auth_code = '''        if not all((config.GMAIL_CLIENT_ID, config.GMAIL_CLIENT_SECRET, config.GMAIL_REFRESH_TOKEN)):
+            raise ValueError("Не заданы Gmail OAuth2 credentials")
+        token_response = httpx.post("https://oauth2.googleapis.com/token", data={
+            "client_id": config.GMAIL_CLIENT_ID,
+            "client_secret": config.GMAIL_CLIENT_SECRET,
+            "refresh_token": config.GMAIL_REFRESH_TOKEN,
+            "grant_type": "refresh_token",
+        }, timeout=30)
+        token_response.raise_for_status()
+        headers["Authorization"] = "Bearer " + token_response.json()["access_token"]
+''' if gmail else ""
     if response_format == "json":
         output = 'value = response.json()\n        values = value if isinstance(value, list) else [value]\n        result.extend({"json": value} for value in values)'
     elif response_format == "text":
@@ -78,15 +109,18 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
 import time
 
 import httpx
+{"import config" if gmail else ""}
 
 
 def {function_name}(items, results, execution):
     result = []
     for item in items:
+        headers = {headers}
+{body}{auth_code}
         with httpx.Client(timeout={timeout / 1000!r}, follow_redirects=True) as client:
             for attempt in range({tries}):
                 try:
-                    response = client.request({method.upper()!r}, {url_code}, params={params}, headers={headers})
+                    response = client.request({method.upper()!r}, {url_code}, params={params}, headers=headers{', content=body.encode("utf-8")' if body else ''})
                     response.raise_for_status()
                     break
                 except httpx.HTTPError:

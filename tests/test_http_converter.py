@@ -44,6 +44,6 @@ def test_real_http_node_retries_and_splits_json(monkeypatch):
 
 
 def test_unsupported_authentication_is_not_ignored():
-    node = {"name": "send", "parameters": {"url": "https://example.com", "authentication": "predefinedCredentialType"}}
+    node = {"name": "send", "parameters": {"url": "https://example.com", "authentication": "other"}}
     with pytest.raises(WorkflowError, match="аутентификация"):
         generate_http_node(node, "send")

@@ -10,6 +10,7 @@ from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import generate_file_node
 from n8n_transcriper.converters.http import generate_http_node
 from n8n_transcriper.graph import connections, execution_order
+from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
 
@@ -51,6 +52,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     dependencies: set[str] = set()
     completed: set[str] = set()
     uses_deepseek = False
+    uses_gmail = False
     for index, name in enumerate(order):
         node = nodes[name]
         kind = node["type"]
@@ -73,8 +75,20 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         elif kind == "n8n-nodes-base.httpRequest":
             folder = "http_requests"
             source = generate_http_node(node, function)
+            params = node["parameters"]
+            values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody"))]
+            for key in ("headerParameters", "queryParameters"):
+                values.extend((key, pair.get("value")) for pair in params.get(key, {}).get("parameters", []))
+            references = set()
+            for parameter, value in values:
+                if isinstance(value, str):
+                    references.update(compile_expression(value, node=name, parameter=parameter).dependencies)
+            missing = references - completed
+            if missing:
+                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
             arguments = "items, results, execution"
             dependencies.add("httpx>=0.27")
+            uses_gmail |= node.get("parameters", {}).get("nodeCredentialType") == "gmailOAuth2"
         elif kind == "n8n-nodes-base.set":
             folder = "operations"
             source, references = generate_edit_fields(node, function)
@@ -106,10 +120,27 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     files["main.py"] = ('import logging\nimport uuid\n\n' + '\n'.join(imports) +
         '\n\n\ndef run(input_data=None):\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + '\n    return items\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')
-    files["config.py"] = ('import os\n\n# Ключ модели DeepSeek; задайте переменную окружения.\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n' if uses_deepseek else '"""Настройки авторизации."""\n')
+    config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
+    if uses_deepseek:
+        config += '\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n'
+    if uses_gmail:
+        config += '\nGMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\nGMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")\nGMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")\n'
+    files["config.py"] = config
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
-    files["README.md"] = '# Сгенерированный проект\n\nУстановите зависимости: `pip install -r requirements.txt`. Запуск: `python main.py`.\n'
-    files["conversion_report.md"] = f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n'
+    required = []
+    if uses_deepseek:
+        required.append("DEEPSEEK_API_KEY")
+    if uses_gmail:
+        required.extend(["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"])
+    credentials = ', '.join(f'`{key}`' for key in required) if required else 'не требуются'
+    files["README.md"] = ('# Сгенерированный проект\n\n'
+        'Установите зависимости: `python -m pip install -r requirements.txt`.\n\n'
+        f'Переменные окружения для авторизации: {credentials}.\n\n'
+        'Запуск: `python main.py`. Данные подключения читаются из `config.py`.\n')
+    files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'
+    files["conversion_report.md"] = (f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. '
+        f'Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n\n'
+        f'Настройки авторизации: {credentials}.\n')
     output = Path(output)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise WorkflowError(f"Каталог назначения не пуст: {output}")
