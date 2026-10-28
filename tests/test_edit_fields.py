@@ -73,3 +73,16 @@ def test_invalid_boolean_does_not_become_true():
     exec(source, namespace)
     with pytest.raises(ValueError, match="boolean"):
         namespace["run"]([{"json": {}}], {}, {})
+
+
+@pytest.mark.parametrize("mode,field,expected", [
+    ("selected", "includeFields", {"keep": 1}),
+    ("except", "excludeFields", {"drop": 2}),
+])
+def test_select_or_exclude_input_fields(mode, field, expected):
+    node = {"name": "Edit", "typeVersion": 3.5, "parameters": {
+        "includeOtherFields": True, "include": mode, field: "keep", "assignments": {"assignments": []}}}
+    source, _ = generate_edit_fields(node, "run")
+    namespace = {}
+    exec(source, namespace)
+    assert namespace["run"]([{"json": {"keep": 1, "drop": 2}}], {}, {}) == [{"json": expected}]

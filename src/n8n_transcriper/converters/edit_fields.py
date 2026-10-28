@@ -16,14 +16,28 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
     version = node.get("typeVersion")
     if not isinstance(version, (int, float)) or isinstance(version, bool) or not 3.3 <= version <= 3.5:
         raise WorkflowError(f"Узел {name}: неподдерживаемая версия Set {version!r}")
-    if set(p) - {"mode", "assignments", "includeOtherFields", "include", "options"}:
+    if set(p) - {"mode", "assignments", "includeOtherFields", "include", "includeFields", "excludeFields", "options"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые параметры Edit Fields")
-    if p.get("mode", "manual") != "manual" or p.get("include", "all") != "all":
-        raise WorkflowError(f"Узел {name}: поддерживается только ручное назначение и включение всех полей")
+    if p.get("mode", "manual") != "manual" or p.get("include", "all") not in {"all", "selected", "except"}:
+        raise WorkflowError(f"Узел {name}: неподдерживаемый режим Edit Fields")
     include = p.get("includeOtherFields", False)
     options = p.get("options", {})
     if not isinstance(include, bool) or not isinstance(options, dict) or set(options) - {"stripBinary", "includeBinary", "dotNotation"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые настройки Edit Fields")
+    selection = p.get("include", "all") if include else "none"
+    selection_field = "includeFields" if selection == "selected" else "excludeFields" if selection == "except" else None
+    fields_text = p.get(selection_field, "") if selection_field else ""
+    if not isinstance(fields_text, str) or "{{" in fields_text or any(c in fields_text for c in ".["):
+        raise WorkflowError(f"Узел {name}: поддерживается только статический список простых полей")
+    selected_fields = [field.strip() for field in fields_text.split(",") if field.strip()]
+    if selection == "selected":
+        data_code = f'{{key: deepcopy(item["json"][key]) for key in {selected_fields!r} if key in item.get("json", {{}})}}'
+    elif selection == "except":
+        data_code = f'{{key: deepcopy(value) for key, value in item.get("json", {{}}).items() if key not in {selected_fields!r}}}'
+    elif selection == "all":
+        data_code = 'deepcopy(item.get("json", {}))'
+    else:
+        data_code = '{}'
     for option, value in options.items():
         if not isinstance(value, bool):
             raise WorkflowError(f"Узел {name}: настройка {option} должна быть логической")
@@ -94,7 +108,7 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
 '''
     source = ('import json\nimport re\nfrom copy import deepcopy\n\n\n' + helper + '\n\n' + f'def {function_name}(items, results, execution):\n' +
               '    result = []\n    for item in items:\n' +
-              f'        data = deepcopy(item.get("json", {{}})) if {include!r} else {{}}\n' +
+              f'        data = {data_code}\n' +
               ('\n'.join(lines) + '\n' if lines else '') +
               '        output = {"json": data}\n' +
               f'        if {keep_binary!r} and "binary" in item:\n            output["binary"] = dict(item["binary"])\n' +
