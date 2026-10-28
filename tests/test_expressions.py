@@ -45,3 +45,17 @@ def test_strict_boolean_expression_distinguishes_numbers_and_strings():
     assert namespace["check"]({"json": {"check": True}}) is True
     assert namespace["check"]({"json": {"check": 1}}) is False
     assert namespace["check"]({"json": {"check": "true"}}) is False
+
+
+def test_strict_comparisons_preserve_javascript_types():
+    result = compile_expression("={{ $json.first === $json.second }}", node="IF", parameter="condition")
+    namespace = {}
+    exec("def check(item):\n    return " + result.code, namespace)
+    assert namespace["check"]({"json": {"first": 1, "second": 1.0}}) is True
+    assert namespace["check"]({"json": {"first": True, "second": 1}}) is False
+    assert namespace["check"]({"json": {"first": {}, "second": {}}}) is False
+    inverse = compile_expression("={{ $json.first !== 'a === b' }}", node="IF", parameter="condition")
+    exec("def inverse(item):\n    return " + inverse.code, namespace)
+    assert namespace["inverse"]({"json": {"first": "a === b"}}) is False
+    with pytest.raises(WorkflowError, match="цепочка сравнений"):
+        compile_expression("={{ $json.a === $json.b !== true }}", node="IF", parameter="condition")

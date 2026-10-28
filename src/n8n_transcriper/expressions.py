@@ -55,12 +55,39 @@ def _split_top_level(value: str, delimiter: str) -> list[str]:
 
 def _expression(value: str) -> Expression:
     value = value.strip()
-    comparison = re.fullmatch(r"(.+?)\s*(===|!==)\s*(true|false|null)", value, re.DOTALL)
-    if comparison:
-        left = _expression(comparison.group(1))
-        literal = {"true": "True", "false": "False", "null": "None"}[comparison.group(3)]
-        operator = "is" if comparison.group(2) == "===" else "is not"
-        return Expression(f"({left.code} {operator} {literal})", left.dependencies)
+    comparisons = []
+    for operator in ("===", "!=="):
+        # Подстановка разделителя выполняется только вне строк и вложенных скобок.
+        quote = None
+        escaped = False
+        depth = 0
+        for index, char in enumerate(value):
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+            elif char in "'\"":
+                quote = char
+            elif char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth -= 1
+            elif depth == 0 and value.startswith(operator, index):
+                comparisons.append((index, operator))
+    if len(comparisons) > 1:
+        raise ValueError("цепочка сравнений не поддерживается")
+    if comparisons:
+        index, operator = comparisons[0]
+        left = _expression(value[:index])
+        right = _expression(value[index + len(operator):])
+        equality = ('(type(a) in (int, float) and type(b) in (int, float) and a == b) or '
+                    '(type(a) is type(b) and (a is b if isinstance(a, (dict, list)) else a == b))')
+        comparison = f"not ({equality})" if operator == "!==" else f"({equality})"
+        code = f"(lambda a, b: {comparison})({left.code}, {right.code})"
+        return Expression(code, left.dependencies | right.dependencies)
     parts = _split_top_level(value, "+")
     if len(parts) > 1:
         compiled = [_expression(part) for part in parts]
