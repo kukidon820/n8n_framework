@@ -16,9 +16,9 @@ def test_file_and_ai_workflow_with_mock_model(tmp_path):
         },
     }
     model = {
-        "id": "model", "name": "DeepSeek Chat Model",
-        "type": "@n8n/n8n-nodes-langchain.lmChatDeepSeek",
-        "parameters": {"model": "deepseek-flash", "options": {
+        "id": "model", "name": "OpenRouter Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+        "parameters": {"model": "openai/gpt-4.1-mini", "options": {
             "temperature": 0.8, "maxTokens": 2500, "timeout": 180000, "maxRetries": 0,
         }},
     }
@@ -66,7 +66,7 @@ class Response:
 prompts = []
 
 def post(url, **kwargs):
-    assert url == "https://api.deepseek.com/chat/completions"
+    assert url == "https://openrouter.ai/api/v1/chat/completions"
     prompts.append(kwargs["json"]["messages"][1]["content"])
     return Response()
 ''', encoding="utf-8")
@@ -78,7 +78,7 @@ assert main.run() == [{"json": {"output": "analysis complete"}}]
 assert '"total":1' in httpx.prompts[0]
 assert "First" in httpx.prompts[0]
 '''
-    env = {**os.environ, "DEEPSEEK_API_KEY": "test-key"}
+    env = {**os.environ, "OPENROUTER_CHAT_MODEL_API_KEY": "test-key"}
     result = subprocess.run([sys.executable, "-X", "utf8", "-c", script], cwd=output,
                             env=env, capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stderr

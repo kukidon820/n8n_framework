@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from n8n_transcriper.converters.code import generate_code_node
-from n8n_transcriper.converters.ai import generate_deepseek_agent
+from n8n_transcriper.converters.ai import generate_ai_agent
 from n8n_transcriper.converters.conditions import generate_condition_node
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import generate_file_node
@@ -71,9 +71,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     for edge in auxiliary:
         if (edge.channel != "ai_languageModel" or edge.target_type != "ai_languageModel" or
                 edge.output != 0 or edge.input != 0 or edge.target in models or
-                nodes[edge.source]["type"] != "@n8n/n8n-nodes-langchain.lmChatDeepSeek" or
                 nodes[edge.target]["type"] != "@n8n/n8n-nodes-langchain.agent"):
-            raise WorkflowError("Пока поддерживаются только линейные основные соединения и одна модель DeepSeek")
+            raise WorkflowError("Поддерживается одно соединение ai_languageModel на AI Agent; другие дополнительные соединения пока не поддерживаются")
         models[edge.target] = edge.source
     model_names = set(models.values())
     if len(model_names) != len(models):
@@ -87,14 +86,18 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     for edge in main_edges:
         incoming[edge.target] += 1
         outgoing[edge.source] += 1
-    if any(incoming[name] > 1 and nodes[name]["type"] != "n8n-nodes-base.merge" for name in main_nodes) or sum(v == 0 for v in incoming.values()) != 1:
-        raise WorkflowError("Несколько входов поддерживаются только для Merge")
+    if sum(v == 0 for v in incoming.values()) != 1:
+        raise WorkflowError("Workflow должен иметь ровно одну начальную точку")
     for source in main_nodes:
         ports = [edge.output for edge in main_edges if edge.source == source]
         if nodes[source]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} and any(port != 0 for port in ports):
             raise WorkflowError(f"Узел {source}: неподдерживаемые выходы")
     order = [name for name in execution_order(workflow) if name not in model_names]
-    branching = any(nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge"} or outgoing[name] > 1 for name in main_nodes)
+    branching = any(
+        nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge"}
+        or outgoing[name] > 1 or incoming[name] > 1
+        for name in main_nodes
+    )
     linked_names = set().union(*(_linked_item_nodes(node.get("parameters", {})) for node in nodes.values()), set())
     linked_items = bool(linked_names)
     parents = {name: sorted((edge for edge in main_edges if edge.target == name), key=lambda edge: edge.input) for name in main_nodes}
@@ -111,7 +114,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     skipped = 0
     dependencies: set[str] = set()
     completed: set[str] = set()
-    uses_deepseek = False
+    ai_model_configs: dict[str, dict[str, Any]] = {}
     uses_gmail = False
     http_credentials: set[str] = set()
     http_credential_descriptions: dict[str, set[str]] = {}
@@ -211,15 +214,19 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             arguments = "merge_inputs"
         elif kind == "@n8n/n8n-nodes-langchain.agent":
             if name not in models:
-                raise WorkflowError(f"Узел {name}: не подключена модель DeepSeek")
+                raise WorkflowError(f"Узел {name}: не подключена chat-модель через ai_languageModel")
             folder = "ai_nodes"
-            source, references = generate_deepseek_agent(node, nodes[models[name]], function)
+            model_name = models[name]
+            model_prefix = module_names[model_name].upper()
+            source, references, model_config = generate_ai_agent(
+                node, nodes[model_name], function, model_prefix
+            )
+            ai_model_configs[model_prefix] = model_config
             missing = references - (completed & ancestors[name] if branching else completed)
             if missing:
                 raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
             arguments = "items, results, execution"
             dependencies.add("httpx>=0.27")
-            uses_deepseek = True
         elif kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
             folder = "operations"
             source, references, output_count = generate_condition_node(node, function)
@@ -235,16 +242,18 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         files[f"{folder}/__init__.py"] = ""
         imports.append(f"from {folder}.{stem} import {function} as {stem}")
         if branching:
-            edge = parents[name][0] if parents[name] else None
             if kind == "n8n-nodes-base.merge":
                 values = [f'deepcopy({aliases[e.source]}[{e.output}])' for e in parents[name]]
                 inputs_code = f"[{', '.join(values)}]"
                 calls.append(f"    merge_inputs = _tag_merge_inputs({inputs_code})" if linked_items else f"    merge_inputs = {inputs_code}")
                 calls.append("    items = merge_inputs[0]")
-            elif edge:
-                fanout = sum(1 for e in main_edges if e.source == edge.source and e.output == edge.output) > 1
-                value = f"{aliases[edge.source]}[{edge.output}]"
-                calls.append(f"    items = {'deepcopy(' + value + ')' if fanout else value}")
+            elif parents[name]:
+                calls.append("    items = []")
+                for edge in parents[name]:
+                    fanout = sum(1 for e in main_edges if e.source == edge.source and e.output == edge.output) > 1
+                    value = f"{aliases[edge.source]}[{edge.output}]"
+                    copied_value = f"deepcopy({value})" if fanout else value
+                    calls.append(f"    items.extend({copied_value})")
             is_condition = kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}
             count = output_count if is_condition else 1
             merge_options = node.get("parameters", {}).get("options", {})
@@ -395,8 +404,21 @@ def _clean_items(items):
         '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    """Выполнить workflow; input_data — список n8n items."""\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')
     config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
-    if uses_deepseek:
-        config += '\n# API-ключ подключённой модели DeepSeek Chat.\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n'
+    for prefix, model_config in sorted(ai_model_configs.items()):
+        api_url = model_config["api_url"]
+        model_id = model_config["model"]
+        options = model_config["options"]
+        config += (
+            '\n# Настройки подключённой AI-модели; API-ключ задаётся через окружение.\n'
+            f'{prefix}_API_URL = os.getenv({(prefix + "_API_URL")!r}, {api_url!r})\n'
+            f'{prefix}_API_KEY = os.getenv({(prefix + "_API_KEY")!r}, "")\n'
+            f'{prefix}_API_KEY_HEADER = os.getenv({(prefix + "_API_KEY_HEADER")!r}, {model_config["api_key_header"]!r})\n'
+            f'{prefix}_API_KEY_PREFIX = os.getenv({(prefix + "_API_KEY_PREFIX")!r}, {model_config["api_key_prefix"]!r})\n'
+            f'{prefix}_MODEL = os.getenv({(prefix + "_MODEL")!r}, {model_id!r})\n'
+            f'{prefix}_OPTIONS = {options!r}\n'
+            f'{prefix}_TIMEOUT = float(os.getenv({(prefix + "_TIMEOUT")!r}, {str(model_config["timeout"])!r}))\n'
+            f'{prefix}_MAX_RETRIES = int(os.getenv({(prefix + "_MAX_RETRIES")!r}, {str(model_config["max_retries"])!r}))\n'
+        )
     if uses_gmail:
         config += ('\n# OAuth2 credentials Gmail; значения берутся из окружения.\n'
                    'GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\n'
@@ -416,8 +438,10 @@ def _clean_items(items):
     files["config.py"] = config
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
     required = []
-    if uses_deepseek:
-        required.append("DEEPSEEK_API_KEY")
+    for prefix, model_config in sorted(ai_model_configs.items()):
+        required.append(f"{prefix}_API_KEY")
+        if not model_config["api_url"]:
+            required.append(f"{prefix}_API_URL")
     if uses_gmail:
         required.extend(["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"])
     required.extend(sorted(http_credentials))
@@ -433,6 +457,10 @@ def _clean_items(items):
         '## Настройка credentials\n\n'
         f'Задайте переменные окружения: {credentials}. Секреты не записывайте в исходники. '
         'В `config.py` перечислены имена используемых переменных.\n\n'
+        + ('AI Agent без инструментов выполняется прямым HTTP-запросом к OpenAI-compatible Chat Completions API. '
+           'Провайдер задаётся значениями `*_API_URL`, `*_API_KEY`, `*_API_KEY_HEADER`, `*_API_KEY_PREFIX`, `*_MODEL` и `*_OPTIONS` в `config.py`.\n\n'
+           if ai_model_configs else '')
+        +
         'PowerShell: `$env:ИМЯ_ПЕРЕМЕННОЙ = "значение"`. Linux/macOS: `export ИМЯ_ПЕРЕМЕННОЙ="значение"`.\n\n'
         '## Запуск\n\n'
         'Windows PowerShell: `.venv\\Scripts\\python.exe main.py`. Linux/macOS: `.venv/bin/python main.py`.\n\n'
