@@ -13,6 +13,7 @@ from n8n_transcriper.converters.conditions import generate_condition_node
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import generate_file_node
 from n8n_transcriper.converters.http import generate_http_node, http_credential_fields
+from n8n_transcriper.converters.merge import generate_merge_node
 from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgres_node
 from n8n_transcriper.graph import connections, execution_order
 from n8n_transcriper.expressions import compile_expression
@@ -61,7 +62,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     if len(model_names) != len(models):
         raise WorkflowError("Одна модель не может быть подключена к нескольким агентам")
     main_edges = [edge for edge in edges if edge.channel == "main"]
-    if any(edge.target_type != "main" or edge.input != 0 or edge.source in model_names or edge.target in model_names for edge in main_edges):
+    if any(edge.target_type != "main" or edge.source in model_names or edge.target in model_names or (edge.input != 0 and nodes[edge.target]["type"] != "n8n-nodes-base.merge") for edge in main_edges):
         raise WorkflowError("Неподдерживаемые основные соединения")
     main_nodes = set(nodes) - model_names
     incoming = {name: 0 for name in main_nodes}
@@ -69,19 +70,18 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     for edge in main_edges:
         incoming[edge.target] += 1
         outgoing[edge.source] += 1
-    if len(main_edges) != len(main_nodes) - 1 or any(v > 1 for v in incoming.values()) or sum(v == 0 for v in incoming.values()) != 1:
-        raise WorkflowError("Поддерживается только одно дерево без объединения входов")
+    if any(incoming[name] > 1 and nodes[name]["type"] != "n8n-nodes-base.merge" for name in main_nodes) or sum(v == 0 for v in incoming.values()) != 1:
+        raise WorkflowError("Несколько входов поддерживаются только для Merge")
     for source in main_nodes:
         ports = [edge.output for edge in main_edges if edge.source == source]
         if nodes[source]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} and any(port != 0 for port in ports):
             raise WorkflowError(f"Узел {source}: неподдерживаемые выходы")
     order = [name for name in execution_order(workflow) if name not in model_names]
-    branching = any(nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} or outgoing[name] > 1 for name in main_nodes)
-    parent = {edge.target: edge for edge in main_edges}
+    branching = any(nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge"} or outgoing[name] > 1 for name in main_nodes)
+    parents = {name: sorted((edge for edge in main_edges if edge.target == name), key=lambda edge: edge.input) for name in main_nodes}
     ancestors = {}
     for name in order:
-        edge = parent.get(name)
-        ancestors[name] = ({edge.source} | ancestors[edge.source]) if edge else set()
+        ancestors[name] = set().union(*({edge.source} | ancestors[edge.source] for edge in parents[name])) if parents[name] else set()
     aliases = {name: f"output_{index:03d}" for index, name in enumerate(order)}
     module_names = _module_names(nodes)
     files: dict[str, str] = {}
@@ -164,6 +164,14 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             arguments = "items, results, execution"
             dependencies.add("psycopg[binary]>=3.1")
             files["database/postgres.py"] = POSTGRES_MODULE
+        elif kind == "n8n-nodes-base.merge":
+            folder = "operations"
+            source, input_count = generate_merge_node(node, function)
+            if [edge.input for edge in parents[name]] != list(range(input_count)):
+                raise WorkflowError(f"Узел {name}: Merge требует по одному соединению на каждый вход")
+            if any(nodes[ancestor]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} for ancestor in ancestors[name]):
+                raise WorkflowError(f"Узел {name}: Merge после условных ветвей пока не поддерживается")
+            arguments = "merge_inputs"
         elif kind == "@n8n/n8n-nodes-langchain.agent":
             if name not in models:
                 raise WorkflowError(f"Узел {name}: не подключена модель DeepSeek")
@@ -190,14 +198,18 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         files[f"{folder}/__init__.py"] = ""
         imports.append(f"from {folder}.{stem} import {function} as {stem}")
         if branching:
-            edge = parent.get(name)
-            if edge:
+            edge = parents[name][0] if parents[name] else None
+            if kind == "n8n-nodes-base.merge":
+                values = [f'deepcopy({aliases[e.source]}[{e.output}])' for e in parents[name]]
+                calls.extend([f"    merge_inputs = [{', '.join(values)}]", "    items = merge_inputs[0]"])
+            elif edge:
                 fanout = sum(1 for e in main_edges if e.source == edge.source and e.output == edge.output) > 1
                 value = f"{aliases[edge.source]}[{edge.output}]"
                 calls.append(f"    items = {'deepcopy(' + value + ')' if fanout else value}")
             is_condition = kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}
             count = output_count if is_condition else 1
-            calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", "    if items:",
+            ready = "all(merge_inputs)" if kind == "n8n-nodes-base.merge" else "items"
+            calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", f"    if {ready}:",
                           f"        logging.info({(name + ': started')!r})"])
             if is_condition:
                 calls.append(f"        {aliases[name]} = {stem}({arguments})")

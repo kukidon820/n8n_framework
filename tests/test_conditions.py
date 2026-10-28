@@ -59,7 +59,7 @@ def test_switch_matching_and_fallback(tmp_path, all_matches, expected):
 def test_merge_rejected(tmp_path):
     node = {"id": "if", "name": "IF", "type": "n8n-nodes-base.if", "parameters": {"conditions": condition("x")}}
     workflow = {"nodes": [node, code_node("Join", "join")], "connections": {"IF": {"main": [[edge("Join")], [edge("Join")]]}}}
-    with pytest.raises(WorkflowError, match="объединения"):
+    with pytest.raises(WorkflowError, match="Merge"):
         generate_project(workflow, tmp_path / "output")
 
 
