@@ -215,7 +215,9 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             count = output_count if is_condition else 1
             merge_options = node.get("parameters", {}).get("options", {})
             include_unpaired = isinstance(merge_options, dict) and merge_options.get("includeUnpaired", False)
-            ready = ("any(merge_inputs)" if include_unpaired else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
+            merge_params = node.get("parameters", {})
+            outer_join = merge_params.get("mode") == "combine" and merge_params.get("combineBy", "combineByFields") == "combineByFields" and merge_params.get("joinMode", "keepMatches") != "keepMatches"
+            ready = ("any(merge_inputs)" if include_unpaired or outer_join else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
             calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", f"    if {ready}:",
                           f"        logging.info({(name + ': started')!r})"])
             if node.get("executeOnce", False):
