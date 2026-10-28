@@ -12,7 +12,7 @@
 4. `converters/` генерирует код для конкретных типов узлов.
 5. `generator.py` соединяет модули в `main.py`, создаёт `config.py`, `requirements.txt`, README и отчёт.
 
-AI-соединение `ai_languageModel` связывает DeepSeek Chat Model с Agent и не становится отдельным последовательным вызовом. Неизвестные дополнительные каналы и неподдерживаемые графы отклоняются с `WorkflowError`.
+AI-соединение `ai_languageModel` связывает подключённую chat-модель с Agent и не становится отдельным последовательным вызовом. Для агента без инструментов генерируется HTTP-вызов OpenAI-compatible Chat Completions API; адрес и credentials находятся в `config.py`. Неизвестные дополнительные каналы и неподдерживаемые графы отклоняются с `WorkflowError`.
 
 ## Структура исходного пакета
 
@@ -46,4 +46,4 @@ src/n8n_transcriper/
 
 ## Credentials и зависимости
 
-`config.py` читает секреты из переменных окружения. `requirements.txt` содержит только библиотеки, необходимые узлам конкретного workflow: например, `httpx` для HTTP/DeepSeek и `psycopg[binary]` для PostgreSQL. Секреты workflow не копируются в generated source.
+`config.py` читает секреты из переменных окружения. `requirements.txt` содержит только библиотеки, необходимые узлам конкретного workflow: например, `httpx` для HTTP и AI Chat Completions, `psycopg[binary]` для PostgreSQL. Секреты workflow не копируются в generated source.

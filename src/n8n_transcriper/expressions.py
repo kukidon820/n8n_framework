@@ -59,6 +59,18 @@ def _split_top_level(value: str, delimiter: str) -> list[str]:
 def _expression(value: str) -> Expression:
     """Преобразовать поддерживаемое подмножество JavaScript-выражений."""
     value = value.strip()
+    if value.startswith("Number(") and value.endswith(")"):
+        argument = value[len("Number("):-1]
+        parts = _split_top_level(argument, ",")
+        if len(parts) != 1 or not parts[0].strip():
+            raise ValueError("Number() должен содержать один аргумент")
+        inner = _expression(parts[0])
+        number = (
+            "(lambda value: 0 if value is None or value is False or "
+            "(isinstance(value, str) and not value.strip()) else "
+            "1 if value is True else float(value))"
+        )
+        return Expression(f"{number}({inner.code})", inner.dependencies)
     # JavaScript && и || возвращают один из операндов, а не обязательно bool.
     for operator in ("||", "&&"):
         quote = None

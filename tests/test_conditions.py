@@ -5,7 +5,6 @@ import sys
 import pytest
 
 from n8n_transcriper.generator import generate_project
-from n8n_transcriper.reader import WorkflowError
 
 
 def condition(value, operation="equals", kind="string"):
@@ -56,11 +55,31 @@ def test_switch_matching_and_fallback(tmp_path, all_matches, expected):
     assert execute(output, [{"json": {"status": "other"}}]) == [{"json": {"branch": "fallback"}}]
 
 
-def test_merge_rejected(tmp_path):
+def test_if_branches_can_converge_without_merge_node(tmp_path):
     node = {"id": "if", "name": "IF", "type": "n8n-nodes-base.if", "parameters": {"conditions": condition("x")}}
     workflow = {"nodes": [node, code_node("Join", "join")], "connections": {"IF": {"main": [[edge("Join")], [edge("Join")]]}}}
-    with pytest.raises(WorkflowError, match="Merge"):
-        generate_project(workflow, tmp_path / "output")
+    output = tmp_path / "output"
+    generate_project(workflow, output)
+    assert execute(output, [{"json": {"status": "x"}}, {"json": {"status": "other"}}]) == [
+        {"json": {"branch": "join"}}, {"json": {"branch": "join"}},
+    ]
+    assert execute(output, [{"json": {"status": "x"}}]) == [{"json": {"branch": "join"}}]
+
+
+def test_if_number_expression_routes_and_converges(tmp_path):
+    start = code_node("Start", "start")
+    start["parameters"]["pythonCode"] = 'return [{"json": {"pending": "2"}}]'
+    conditions = condition(0, operation="gt", kind="number")
+    conditions["conditions"][0]["leftValue"] = "={{ Number($('Start').first().json.pending) }}"
+    node = {"id": "if-number", "name": "IF", "type": "n8n-nodes-base.if",
+            "parameters": {"conditions": conditions}}
+    workflow = {"nodes": [start, node, code_node("Join", "join")], "connections": {
+        "Start": {"main": [[edge("IF")]]},
+        "IF": {"main": [[edge("Join")], [edge("Join")]]},
+    }}
+    output = tmp_path / "output"
+    generate_project(workflow, output)
+    assert execute(output, [{"json": {}}]) == [{"json": {"branch": "join"}}]
 
 
 def test_merge_append_joins_selected_conditional_outputs(tmp_path):
