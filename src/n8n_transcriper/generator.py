@@ -9,7 +9,7 @@ from n8n_transcriper.converters.ai import generate_deepseek_agent
 from n8n_transcriper.converters.conditions import generate_condition_node
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import generate_file_node
-from n8n_transcriper.converters.http import generate_http_node
+from n8n_transcriper.converters.http import generate_http_node, http_credential_fields
 from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgres_node
 from n8n_transcriper.graph import connections, execution_order
 from n8n_transcriper.expressions import compile_expression
@@ -68,6 +68,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     completed: set[str] = set()
     uses_deepseek = False
     uses_gmail = False
+    http_credentials: set[str] = set()
     postgres_credential = None
     for index, name in enumerate(order):
         node = nodes[name]
@@ -100,6 +101,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         elif kind == "n8n-nodes-base.httpRequest":
             folder = "http_requests"
             source = generate_http_node(node, function)
+            http_credentials.update(http_credential_fields(node).values())
             params = node["parameters"]
             values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody"))]
             for key in ("headerParameters", "queryParameters"):
@@ -192,6 +194,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         config += '\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n'
     if uses_gmail:
         config += '\nGMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\nGMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")\nGMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")\n'
+    for key in sorted(http_credentials):
+        config += f'\n{key} = os.getenv({key!r}, "")\n'
     if postgres_credential is not None:
         config += '\nPOSTGRES_HOST = os.getenv("POSTGRES_HOST", "")\nPOSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))\nPOSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "")\nPOSTGRES_USER = os.getenv("POSTGRES_USER", "")\nPOSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")\n'
     files["config.py"] = config
@@ -201,6 +205,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         required.append("DEEPSEEK_API_KEY")
     if uses_gmail:
         required.extend(["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"])
+    required.extend(sorted(http_credentials))
     if postgres_credential is not None:
         required.extend(["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"])
     credentials = ', '.join(f'`{key}`' for key in required) if required else 'не требуются'

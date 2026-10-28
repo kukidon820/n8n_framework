@@ -4,8 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from n8n_transcriper.converters.http import generate_http_node
+from n8n_transcriper.converters.http import generate_http_node, http_credential_fields
 from n8n_transcriper.reader import WorkflowError, read_workflow
+from n8n_transcriper.generator import generate_project
 
 
 def test_real_http_node_retries_and_splits_json(monkeypatch):
@@ -87,3 +88,54 @@ def test_proxy_secrets_not_embedded():
     node = {"name": "HTTP", "parameters": {"url": "https://example.com", "options": {"proxy": "http://user:secret@proxy:8080"}}}
     with pytest.raises(WorkflowError, match="credentials"):
         generate_http_node(node, "request")
+
+
+@pytest.mark.parametrize("kind,values", [("httpBasicAuth", {"USERNAME": "alice", "PASSWORD": "secret"}),
+                                         ("httpBearerAuth", {"TOKEN": "secret"})])
+def test_generic_credentials_from_config(monkeypatch, kind, values):
+    options = []
+    headers = []
+    class Client:
+        def __init__(self, **kwargs): options.append(kwargs)
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def request(self, method, url, **kwargs):
+            headers.append(kwargs["headers"])
+            return SimpleNamespace(raise_for_status=lambda: None, content=b"{}", json=lambda: {})
+
+    node = {"name": "API", "parameters": {"url": "https://example.com", "authentication": "genericCredentialType",
+        "genericAuthType": kind, "options": {"response": {"response": {"responseFormat": "json"}}}},
+        "credentials": {kind: {"id": "credential", "name": "credential"}}}
+    fields = http_credential_fields(node)
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields[key]: value for key, value in values.items()}))
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=Exception))
+    source = generate_http_node(node, "request")
+    assert "secret" not in source
+    namespace = {}
+    exec(source, namespace)
+    assert namespace["request"]([{"json": {}}], {}, {}) == [{"json": {}}]
+    if kind == "httpBasicAuth":
+        assert options[0]["auth"] == ("alice", "secret")
+    else:
+        assert headers[0]["Authorization"] == "Bearer secret"
+
+
+def test_header_credentials_reject_cross_origin_redirect():
+    node = {"name": "API", "typeVersion": 4.2, "parameters": {"url": "https://example.com",
+        "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth"},
+        "credentials": {"httpHeaderAuth": {"id": "id"}}}
+    with pytest.raises(WorkflowError, match="redirect"):
+        generate_http_node(node, "request")
+
+
+def test_generated_config_contains_only_placeholders(tmp_path):
+    node = {"id": "node", "name": "API", "type": "n8n-nodes-base.httpRequest", "parameters": {
+        "url": "https://example.com", "authentication": "genericCredentialType", "genericAuthType": "httpBearerAuth",
+        "options": {"response": {"response": {"responseFormat": "json"}}}},
+        "credentials": {"httpBearerAuth": {"id": "credential", "name": "API"}}}
+    output = tmp_path / "generated"
+    generate_project({"nodes": [node], "connections": {}}, output)
+    field = http_credential_fields(node)["TOKEN"]
+    config = (output / "config.py").read_text(encoding="utf-8")
+    assert f'{field} = os.getenv(' in config
+    assert field in (output / "README.md").read_text(encoding="utf-8")
