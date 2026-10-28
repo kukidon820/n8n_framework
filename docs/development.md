@@ -33,11 +33,11 @@ uv run python convert.py workflow.json --out generated
 
 ```bash
 cd generated
-uv venv
-uv pip install -r requirements.txt
+uv sync --locked
+uv run python main.py
 ```
 
-Запустите `.venv\\Scripts\\python.exe main.py` в Windows PowerShell или `.venv/bin/python main.py` в Linux/macOS. Переменные секретов задаются в окружении процесса; `.env` без дополнительной библиотеки автоматически не читается.
+Переменные секретов задаются в окружении процесса; `.env` без дополнительной библиотеки автоматически не читается.
 
 Для импорта используйте `from main import run` и передавайте `run()` список items формата `[{"json": {...}}]`.
 

@@ -1,5 +1,6 @@
 """Командная строка конвертера."""
 
+import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,6 +22,28 @@ def _echo_terminal_safe(message: object, *, err: bool = False) -> None:
     typer.echo(safe_message, err=err)
 
 
+def _create_uv_lock(project: Path) -> None:
+    """Разрешить зависимости созданного проекта и записать uv.lock."""
+    try:
+        result = subprocess.run(
+            ["uv", "lock"],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise WorkflowError("Не найден uv. Установите uv и повторите команду convert.") from exc
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        message = f"Не удалось создать uv.lock командой `uv lock` (код {result.returncode})."
+        if detail:
+            message += f"\n{detail}"
+        raise WorkflowError(message)
+
+
 @app.callback()
 def main() -> None:
     """Работа с workflow n8n."""
@@ -34,6 +57,7 @@ def convert(
     """Преобразовать поддерживаемый workflow в проект Python."""
     try:
         generate_project(read_workflow(workflow), out)
+        _create_uv_lock(out)
     except (WorkflowError, OSError) as exc:
         typer.echo(f"Ошибка: {exc}", err=True)
         raise typer.Exit(1) from exc

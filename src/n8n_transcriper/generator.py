@@ -1,6 +1,7 @@
 """Генерация самостоятельного проекта для поддерживаемого линейного workflow."""
 
 import hashlib
+import json
 import keyword
 import re
 from collections import Counter
@@ -55,6 +56,22 @@ def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
     if len(set(result.values())) != len(result):
         raise WorkflowError("Не удалось построить уникальные имена модулей")
     return result
+
+
+def _project_toml(dependencies: set[str]) -> str:
+    """Описать зависимости generated-проекта в формате uv/PEP 621."""
+    dependency_lines = ",\n".join(f"    {json.dumps(value, ensure_ascii=False)}" for value in sorted(dependencies))
+    dependency_block = f"[\n{dependency_lines}\n]" if dependency_lines else "[]"
+    return (
+        "[project]\n"
+        'name = "generated-workflow"\n'
+        'version = "0.1.0"\n'
+        'description = "Самостоятельный Python-проект, созданный из workflow n8n"\n'
+        'requires-python = ">=3.11"\n'
+        f"dependencies = {dependency_block}\n\n"
+        "[tool.uv]\n"
+        "package = false\n"
+    )
 
 
 def generate_project(workflow: dict[str, Any], output: Path) -> None:
@@ -454,6 +471,7 @@ def _clean_items(items):
                    'POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")\n')
     files["config.py"] = config
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
+    files["pyproject.toml"] = _project_toml(dependencies)
     required = []
     for prefix, model_config in sorted(ai_model_configs.items()):
         required.append(f"{prefix}_API_KEY")
@@ -471,8 +489,9 @@ def _clean_items(items):
         '# Сгенерированный проект\n\n'
         'Проект запускает преобразованный workflow как обычную Python-программу. Исходный JSON для запуска не нужен.\n\n'
         '## Требования и установка\n\n'
-        'Нужен Python 3.11 или новее. В каталоге проекта выполните:\n\n'
-        '```bash\nuv venv\nuv pip install -r requirements.txt\n```\n\n'
+        'Нужен Python 3.11 или новее и установленный uv. Зависимости указаны в `pyproject.toml`, '
+        'точные версии зафиксированы в `uv.lock`. В каталоге проекта выполните:\n\n'
+        '```bash\nuv sync --locked\n```\n\n'
         '## Настройка credentials\n\n'
         f'Задайте переменные окружения: {credentials}. Секреты не записывайте в исходники. '
         'В `config.py` перечислены имена используемых переменных.\n\n'
@@ -484,7 +503,7 @@ def _clean_items(items):
         +
         'PowerShell: `$env:ИМЯ_ПЕРЕМЕННОЙ = "значение"`. Linux/macOS: `export ИМЯ_ПЕРЕМЕННОЙ="значение"`.\n\n'
         '## Запуск\n\n'
-        'Windows PowerShell: `.venv\\Scripts\\python.exe main.py`. Linux/macOS: `.venv/bin/python main.py`.\n\n'
+        'Запустите workflow командой `uv run python main.py` на Windows, Linux и macOS.\n\n'
         '`main.py` можно импортировать из другого кода: `from main import run`; функция `run(input_data)` принимает список items вида `[{"json": {...}}]`.\n'
     )
     files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'

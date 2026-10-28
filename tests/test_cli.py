@@ -34,6 +34,10 @@ def test_convert_py_matches_documented_command(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert (output / "main.py").is_file()
+    assert (output / "pyproject.toml").is_file()
+    assert (output / "uv.lock").is_file()
+    assert (output / "requirements.txt").is_file()
+    assert "uv sync --locked" in (output / "README.md").read_text(encoding="utf-8")
 
 
 def test_validate_checks_conversion_without_creating_output(tmp_path):
