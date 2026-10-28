@@ -105,7 +105,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             raise WorkflowError(f"Узел {name}: настройка onError пока не поддерживается")
         if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
             raise WorkflowError(f"Узел {name}: настройка retryOnFail пока не поддерживается")
-        if kind == "n8n-nodes-base.manualTrigger":
+        trigger_name = kind.rsplit(".", 1)[-1].lower()
+        if trigger_name.endswith("trigger") or kind == "n8n-nodes-base.webhook":
             if index != 0:
                 raise WorkflowError(f"Узел {name}: триггер должен быть первым")
             skipped += 1
