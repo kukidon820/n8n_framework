@@ -89,14 +89,20 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     if not isinstance(response, dict) or set(response) - {"response"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые настройки ответа")
     response = response.get("response", {})
-    if not isinstance(response, dict) or set(response) - {"responseFormat", "outputPropertyName"}:
+    if not isinstance(response, dict) or set(response) - {"responseFormat", "outputPropertyName", "fullResponse", "neverError"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые настройки ответа")
+    full_response = response.get("fullResponse", False)
+    never_error = response.get("neverError", False)
+    if not isinstance(full_response, bool) or not isinstance(never_error, bool):
+        raise WorkflowError(f"Узел {name}: настройки ответа должны быть логическими")
     response_format = response.get("responseFormat", "autodetect")
     if response_format not in ("json", "text", "file", "autodetect"):
         raise WorkflowError(f"Узел {name}: неподдерживаемый формат ответа {response_format!r}")
     page_settings = options.get("pagination")
     page_config = None
     if page_settings is not None:
+        if full_response or never_error:
+            raise WorkflowError(f"Узел {name}: fullResponse и neverError с pagination пока не поддерживаются")
         if not isinstance(page_settings, dict) or set(page_settings) != {"pagination"} or not isinstance(page_settings["pagination"], dict):
             raise WorkflowError(f"Узел {name}: некорректная pagination")
         page_config = page_settings["pagination"]
@@ -280,6 +286,13 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     file_output = f'''binary = dict(item.get("binary", {{}}))
             binary[{output_property!r}] = {{"data": response.content, "mimeType": response.headers.get("content-type", "application/octet-stream")}}
             result.append({{"json": item.get("json", {{}}), "binary": binary}})'''
+    if full_response:
+        metadata = '{"headers": dict(response.headers), "statusCode": response.status_code, "statusMessage": response.reason_phrase}'
+        json_output = f'body_value = response.json() if response.content.strip() else {{}}\n            result.append({{"json": {{**{metadata}, "body": body_value}}}})'
+        text_output = f'result.append({{"json": {{**{metadata}, {output_property!r}: response.text}}}})'
+        file_output = f'''binary = dict(item.get("binary", {{}}))
+            binary[{output_property!r}] = {{"data": response.content, "mimeType": response.headers.get("content-type", "application/octet-stream")}}
+            result.append({{"json": {metadata}, "binary": binary}})'''
     binary_types = ('image/', 'audio/', 'video/', 'application/octet-stream', 'application/gzip', 'application/zip', 'application/vnd.rar', 'application/epub+zip', 'application/x-bzip', 'application/x-bzip2', 'application/x-cdf', 'application/vnd.amazon.ebook', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-fontobject', 'application/vnd.oasis.opendocument.presentation', 'application/pdf', 'application/x-tar', 'application/vnd.visio', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/x-7z-compressed')
     if response_format == "autodetect":
         detect = f'''        content_type = response.headers.get("content-type", "")
@@ -312,7 +325,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
             for attempt in range({tries}):
                 try:
                     response = client.request({method.upper()!r}, request_url, params=page_params, headers=headers{body_argument})
-                    response.raise_for_status()
+                    {"pass" if never_error else "response.raise_for_status()"}
                     break
                 except httpx.HTTPError:
                     if attempt + 1 == {tries}:
