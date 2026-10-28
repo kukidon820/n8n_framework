@@ -43,11 +43,14 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
         raise WorkflowError(f"Узел {name}: некорректный параметр SQL")
     replacement = options.get("queryReplacement", "")
     if tokens:
-        if not isinstance(replacement, str) or not re.fullmatch(r"=\s*{{\s*[^{}]+\s*}}", replacement):
-            raise WorkflowError(f"Узел {name}: для параметров SQL требуется одно выражение queryReplacement")
-        expression = compile_expression(replacement, node=name, parameter="options.queryReplacement")
-        value = expression.code
-        dependencies = set(expression.dependencies)
+        if not isinstance(replacement, str):
+            raise WorkflowError(f"Узел {name}: queryReplacement должен содержать выражения")
+        parts = re.split(r"\s*,\s*(?==?\s*{{)", replacement)
+        if not parts or any(not re.fullmatch(r"=?\s*{{\s*[^{}]+\s*}}", part) for part in parts):
+            raise WorkflowError(f"Узел {name}: queryReplacement должен содержать выражения через запятую")
+        expressions = [compile_expression(part.strip(), node=name, parameter="options.queryReplacement") for part in parts]
+        value = "[" + ", ".join(expr.code for expr in expressions) + "]"
+        dependencies = set().union(*(expr.dependencies for expr in expressions))
         query = re.sub(r"\$(\d+)", lambda match: f'%(p{match.group(1)})s', query)
         arguments = 'parameters'
     else:
@@ -59,8 +62,10 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
     number_format = options.get("largeNumbersOutput", "text")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1 or number_format != "text":
         raise WorkflowError(f"Узел {name}: некорректные настройки подключения или чисел")
-    parameter_code = (f'        parameter_values = {value}\n'
-                      '        if not isinstance(parameter_values, list):\n            parameter_values = [parameter_values]\n'
+    parameter_code = (f'        parameter_groups = {value}\n'
+                      '        parameter_values = []\n'
+                      '        for group in parameter_groups:\n'
+                      '            parameter_values.extend(group if isinstance(group, list) else [group])\n'
                       f'        if len(parameter_values) < {max(map(int, tokens))}:\n            raise ValueError("Недостаточно параметров PostgreSQL")\n'
                       '        parameters = {}\n'
                       '        for index, parameter in enumerate(parameter_values, 1):\n'

@@ -89,6 +89,10 @@ def test_multiple_parameters_are_bound_separately(monkeypatch):
     exec(code, namespace)
     namespace["run"]([{"json": {"id": 7, "email": "a,b'"}}], {}, {})
     assert calls == [("SELECT id FROM users WHERE id = %(p1)s AND email = %(p2)s", {"p1": 7, "p2": "a,b'"})]
+    node["parameters"]["options"]["queryReplacement"] = "={{ $json.id }},={{ $json.email }}"
+    exec(generate_postgres_node(node, "run")[0], namespace)
+    namespace["run"]([{"json": {"id": 8, "email": "x,y"}}], {}, {})
+    assert calls[-1][1] == {"p1": 8, "p2": "x,y"}
 
 
 def test_transaction_commits_all_or_rolls_back(monkeypatch):
