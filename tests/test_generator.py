@@ -64,7 +64,7 @@ def test_empty_output_stops_linear_chain(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("setting,value", [("disabled", True), ("alwaysOutputData", True), ("executeOnce", True), ("onError", "continueRegularOutput"), ("retryOnFail", True)])
+@pytest.mark.parametrize("setting,value", [("disabled", True), ("alwaysOutputData", "true"), ("executeOnce", 1), ("onError", "continueRegularOutput"), ("retryOnFail", True)])
 def test_unimplemented_execution_settings_fail_before_writing(tmp_path, setting, value):
     node = {"id": "1", "name": "Code", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "return _items"}, setting: value}
     output = tmp_path / "out"
@@ -111,4 +111,17 @@ def test_triggers_are_skipped_and_input_is_manual(tmp_path, kind):
     output = tmp_path / "out"
     generate_project(workflow, output)
     result = subprocess.run([sys.executable, "-c", "import main; assert main.run([{'json': {'x': 1}}]) == [{'json': {'x': 1}}]"], cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_execute_once_and_always_output_data(tmp_path):
+    first = {"id": "1", "name": "First", "type": "n8n-nodes-base.code", "executeOnce": True,
+             "parameters": {"language": "pythonNative", "pythonCode": 'assert len(_items) == 1\nreturn []'}, "alwaysOutputData": True}
+    second = {"id": "2", "name": "Second", "type": "n8n-nodes-base.code", "parameters": {
+        "language": "pythonNative", "pythonCode": 'return [{"json": {"received": _items[0]["json"]}}]'}}
+    workflow = {"nodes": [first, second], "connections": {"First": {"main": [[{"node": "Second", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "out"
+    generate_project(workflow, output)
+    script = 'import main; assert main.run([{"json": {"n": 1}}, {"json": {"n": 2}}]) == [{"json": {"received": {}}}]'
+    result = subprocess.run([sys.executable, "-c", script], cwd=output, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
