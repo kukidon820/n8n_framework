@@ -87,3 +87,16 @@ def test_fanout_branches_use_same_source(tmp_path):
     result = subprocess.run([sys.executable, "-c", "import main; assert main.run() == [{'json': {'value': 6}}, {'json': {'value': 9}}]"],
                             cwd=output, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_module_names_stable_when_node_list_reordered(tmp_path):
+    first = {"id": "stable-1", "name": "My node", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "return _items"}}
+    second = {"id": "stable-2", "name": "My-node", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "return _items"}}
+    connections = {"My node": {"main": [[{"node": "My-node", "type": "main", "index": 0}]]}}
+    first_output, second_output = tmp_path / "first", tmp_path / "second"
+    generate_project({"nodes": [first, second], "connections": connections}, first_output)
+    generate_project({"nodes": [second, first], "connections": connections}, second_output)
+    names = {p.name for p in (first_output / "python_nodes").glob("*.py")}
+    assert names == {p.name for p in (second_output / "python_nodes").glob("*.py")}
+    assert len(names) == 3
+    assert all(name == "__init__.py" or name.startswith("my_node_") for name in names)
