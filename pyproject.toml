@@ -1,0 +1,9 @@
+[project]
+name = "n8n-transcriper"
+version = "0.1.0"
+description = "Generate standalone Python projects from n8n workflows"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8"]
