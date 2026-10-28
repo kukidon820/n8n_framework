@@ -11,6 +11,16 @@ def test_named_node_and_nested_paths():
     assert result.dependencies == {"Settings"}
 
 
+def test_number_conversion_and_named_node_path():
+    result = compile_expression(
+        "={{ Number($('Python - Build CSV').first().json.summary.pending) }}",
+        node="IF",
+        parameter="leftValue",
+    )
+    assert result.dependencies == {"Python - Build CSV"}
+    assert "float(value)" in result.code
+
+
 def test_named_node_linked_item_selector():
     result = compile_expression("={{ $('Build').item.json.rows[0].id }}", node="Edit", parameter="value")
     assert result.code == "results['Build'][item['_n8n_lineage']['Build']]['json']['rows'][0]['id']"

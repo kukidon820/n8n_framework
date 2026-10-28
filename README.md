@@ -80,14 +80,14 @@ result = run([{"json": {"name": "Пример"}}])
 `config.py` перечисляет переменные окружения, которые использует сгенерированный проект. Перед запуском задайте значения в терминале или в окружении процесса. Файл `.env` автоматически не загружается.
 
 ```powershell
-$env:DEEPSEEK_API_KEY = "..."
+$env:OPENROUTER_CHAT_MODEL_API_KEY = "..."
 $env:GMAIL_CLIENT_ID = "..."
 $env:GMAIL_CLIENT_SECRET = "..."
 $env:GMAIL_REFRESH_TOKEN = "..."
 ```
 
 ```bash
-export DEEPSEEK_API_KEY="..."
+export OPENROUTER_CHAT_MODEL_API_KEY="..."
 export GMAIL_CLIENT_ID="..."
 export GMAIL_CLIENT_SECRET="..."
 export GMAIL_REFRESH_TOKEN="..."
@@ -105,7 +105,7 @@ export GMAIL_REFRESH_TOKEN="..."
 | Edit Fields (Set) | Присваивания, типы значений, выбор сохраняемых полей и ссылки на предыдущие узлы |
 | IF и Switch | Условия, правила маршрутизации, fallback и несколько совпавших выходов |
 | Merge | Только режимы Append и Combine; варианты Combine включают сопоставление по полям, позициям и все пары |
-| AI Agent + DeepSeek Chat Model | Обычный HTTP-вызов DeepSeek для агента без подключённых инструментов |
+| AI Agent + chat-модель | Обычный HTTP-вызов к OpenAI-compatible Chat Completions API для агента без подключённых инструментов; URL, ключ и параметры модели находятся в `config.py` |
 | PostgreSQL | `executeQuery` с параметрами; SELECT/INSERT/UPDATE/DELETE и транзакционная пакетная обработка |
 
 Триггеры пропускаются. Описание реализованных параметров и ограничений приведено в [таблице поддержки](docs/supported-nodes.md).
