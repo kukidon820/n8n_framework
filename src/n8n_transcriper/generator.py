@@ -10,6 +10,7 @@ from n8n_transcriper.converters.conditions import generate_condition_node
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import generate_file_node
 from n8n_transcriper.converters.http import generate_http_node
+from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgres_node
 from n8n_transcriper.graph import connections, execution_order
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
@@ -67,6 +68,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     completed: set[str] = set()
     uses_deepseek = False
     uses_gmail = False
+    postgres_credential = None
     for index, name in enumerate(order):
         node = nodes[name]
         kind = node["type"]
@@ -112,6 +114,22 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             if missing:
                 raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
             arguments = "items, results, execution"
+        elif kind == "n8n-nodes-base.postgres":
+            credential = node.get("credentials", {}).get("postgres", {})
+            credential_id = credential.get("id") if isinstance(credential, dict) else None
+            if not isinstance(credential_id, str) or not credential_id:
+                raise WorkflowError(f"Узел {name}: требуется PostgreSQL credential")
+            if postgres_credential is not None and postgres_credential != credential_id:
+                raise WorkflowError(f"Узел {name}: несколько PostgreSQL credentials пока не поддерживаются")
+            postgres_credential = credential_id
+            folder = "database"
+            source, references = generate_postgres_node(node, function)
+            missing = references - (completed & ancestors[name] if branching else completed)
+            if missing:
+                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+            arguments = "items, results, execution"
+            dependencies.add("psycopg[binary]>=3.1")
+            files["database/postgres.py"] = POSTGRES_MODULE
         elif kind == "@n8n/n8n-nodes-langchain.agent":
             if name not in models:
                 raise WorkflowError(f"Узел {name}: не подключена модель DeepSeek")
@@ -167,6 +185,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         config += '\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n'
     if uses_gmail:
         config += '\nGMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\nGMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")\nGMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")\n'
+    if postgres_credential is not None:
+        config += '\nPOSTGRES_HOST = os.getenv("POSTGRES_HOST", "")\nPOSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))\nPOSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "")\nPOSTGRES_USER = os.getenv("POSTGRES_USER", "")\nPOSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")\n'
     files["config.py"] = config
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
     required = []
@@ -174,6 +194,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         required.append("DEEPSEEK_API_KEY")
     if uses_gmail:
         required.extend(["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"])
+    if postgres_credential is not None:
+        required.extend(["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"])
     credentials = ', '.join(f'`{key}`' for key in required) if required else 'не требуются'
     files["README.md"] = ('# Сгенерированный проект\n\n'
         'Установите зависимости: `python -m pip install -r requirements.txt`.\n\n'
