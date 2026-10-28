@@ -100,22 +100,36 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         if not isinstance(page_settings, dict) or set(page_settings) != {"pagination"} or not isinstance(page_settings["pagination"], dict):
             raise WorkflowError(f"Узел {name}: некорректная pagination")
         page_config = page_settings["pagination"]
-        allowed_page = {"paginationMode", "parameters", "paginationCompleteWhen", "limitPagesFetched", "maxRequests", "requestInterval"}
-        if set(page_config) - allowed_page or page_config.get("paginationMode") != "updateAParameterInEachRequest" or page_config.get("paginationCompleteWhen", "responseIsEmpty") != "responseIsEmpty":
+        allowed_page = {"paginationMode", "parameters", "nextURL", "completeExpression", "paginationCompleteWhen", "limitPagesFetched", "maxRequests", "requestInterval"}
+        page_mode = page_config.get("paginationMode")
+        if set(page_config) - allowed_page or page_mode not in {"updateAParameterInEachRequest", "responseContainsNextURL"}:
             raise WorkflowError(f"Узел {name}: неподдерживаемый режим pagination")
         if method.upper() != "GET" or p.get("sendBody", False) or response_format != "json":
             raise WorkflowError(f"Узел {name}: pagination поддерживает GET с JSON-ответом")
-        group = page_config.get("parameters", {})
-        if not isinstance(group, dict) or set(group) != {"parameters"} or not isinstance(group["parameters"], list) or len(group["parameters"]) != 1:
-            raise WorkflowError(f"Узел {name}: pagination требует один параметр query")
-        entry = group["parameters"][0]
-        if not isinstance(entry, dict) or set(entry) != {"type", "name", "value"} or entry.get("type") != "qs" or not isinstance(entry.get("name"), str) or not entry["name"]:
-            raise WorkflowError(f"Узел {name}: некорректный параметр pagination")
-        value = entry.get("value")
-        if not isinstance(value, str) or not re.fullmatch(r"=?\s*{{\s*\$pageCount\s*(?:\+\s*1\s*)?}}", value):
-            raise WorkflowError(f"Узел {name}: поддерживается только $pageCount или $pageCount + 1")
-        page_offset = 1 if "+" in value else 0
-        page_name = entry["name"]
+        if page_mode == "updateAParameterInEachRequest":
+            if page_config.get("paginationCompleteWhen", "responseIsEmpty") != "responseIsEmpty" or "nextURL" in page_config or "completeExpression" in page_config:
+                raise WorkflowError(f"Узел {name}: неподдерживаемое завершение pagination")
+            group = page_config.get("parameters", {})
+            if not isinstance(group, dict) or set(group) != {"parameters"} or not isinstance(group["parameters"], list) or len(group["parameters"]) != 1:
+                raise WorkflowError(f"Узел {name}: pagination требует один параметр query")
+            entry = group["parameters"][0]
+            if not isinstance(entry, dict) or set(entry) != {"type", "name", "value"} or entry.get("type") != "qs" or not isinstance(entry.get("name"), str) or not entry["name"]:
+                raise WorkflowError(f"Узел {name}: некорректный параметр pagination")
+            value = entry.get("value")
+            if not isinstance(value, str) or not re.fullmatch(r"=?\s*{{\s*\$pageCount\s*(?:\+\s*1\s*)?}}", value):
+                raise WorkflowError(f"Узел {name}: поддерживается только $pageCount или $pageCount + 1")
+            page_offset = 1 if "+" in value else 0
+            page_name = entry["name"]
+        else:
+            if auth != "none" or page_config.get("paginationCompleteWhen") != "other" or "parameters" in page_config:
+                raise WorkflowError(f"Узел {name}: pagination по URL пока поддерживается без credentials и с условием other")
+            next_url = page_config.get("nextURL")
+            complete = page_config.get("completeExpression")
+            match = re.fullmatch(r"=?\s*{{\s*\$response\.body((?:\.[A-Za-z_][A-Za-z_0-9]*)+)\s*}}", next_url) if isinstance(next_url, str) else None
+            stop = re.fullmatch(r"=?\s*{{\s*!\s*\$response\.body((?:\.[A-Za-z_][A-Za-z_0-9]*)+)\s*}}", complete) if isinstance(complete, str) else None
+            if not match or not stop or match.group(1) != stop.group(1):
+                raise WorkflowError(f"Узел {name}: требуется nextURL и проверка отсутствия того же поля response.body")
+            next_path = match.group(1).strip('.').split('.')
         max_pages = page_config.get("maxRequests", 100)
         page_interval = page_config.get("requestInterval", 0)
         if page_config.get("limitPagesFetched") is not True or not isinstance(max_pages, int) or isinstance(max_pages, bool) or max_pages < 1 or not isinstance(page_interval, (float, int)) or isinstance(page_interval, bool) or page_interval < 0:
@@ -312,7 +326,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         else:
             {text_output}
 '''
-    if page_config is not None:
+    if page_config is not None and page_mode == "updateAParameterInEachRequest":
         fetch = (f'        for page_index in range({max_pages}):\n'
                  f'            if page_index and {page_interval!r}:\n                time.sleep({page_interval / 1000!r})\n'
                  f'            page_params = dict({params})\n            page_params[{page_name!r}] = page_index + {page_offset}\n' +
@@ -320,6 +334,20 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
                  '            page_data = response.json() if response.content.strip() else []\n'
                  '            if not isinstance(page_data, list):\n                raise TypeError("Pagination responseIsEmpty поддерживает только массив JSON")\n'
                  '            if not page_data:\n                break\n' + textwrap.indent(output_block, '    '))
+    elif page_config is not None:
+        fetch = (f'        for page_index in range({max_pages}):\n'
+                 f'            if page_index and {page_interval!r}:\n                time.sleep({page_interval / 1000!r})\n'
+                 f'            page_params = dict({params})\n' + textwrap.indent(request_block, '    ') +
+                 '            page_data = response.json() if response.content.strip() else {}\n'
+                 '            if not isinstance(page_data, dict):\n                raise TypeError("Pagination ожидает JSON-объект")\n' +
+                 textwrap.indent(output_block, '    ') +
+                 f'            next_url = page_data\n            for key in {next_path!r}:\n'
+                 '                if not isinstance(next_url, dict):\n                    raise TypeError("Некорректный путь nextURL")\n'
+                 '                next_url = next_url.get(key)\n'
+                 '            if next_url is None or next_url is False or next_url == "" or next_url == 0:\n                break\n'
+                 '            if not isinstance(next_url, str) or urlsplit(next_url).scheme not in ("http", "https") or not urlsplit(next_url).hostname:\n'
+                 '                raise ValueError("Некорректный nextURL")\n'
+                 '            request_url = next_url\n')
     else:
         fetch = f'        page_params = {params}\n' + request_block + output_block
     return f'''import json

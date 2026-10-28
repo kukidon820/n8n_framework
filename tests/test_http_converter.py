@@ -260,3 +260,24 @@ def test_pagination_requires_supported_completion():
         "pagination": {"pagination": {"paginationMode": "responseContainsNextURL"}}}}}
     with pytest.raises(WorkflowError, match="pagination"):
         generate_http_node(node, "request")
+
+
+def test_pagination_follows_next_url(monkeypatch):
+    import httpx
+    seen = []
+    real_client = httpx.Client
+    def handle(request):
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"items": [len(seen)], "next": "https://example.com/page2" if len(seen) == 1 else None})
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    node = {"name": "Pages", "parameters": {"url": "https://example.com/page1", "options": {
+        "response": {"response": {"responseFormat": "json"}},
+        "pagination": {"pagination": {"paginationMode": "responseContainsNextURL", "nextURL": "={{ $response.body.next }}",
+            "paginationCompleteWhen": "other", "completeExpression": "={{ !$response.body.next }}",
+            "limitPagesFetched": True, "maxRequests": 5}}}}}
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    result = namespace["request"]([{"json": {}}], {}, {})
+    assert seen == ["https://example.com/page1", "https://example.com/page2"]
+    assert [item["json"]["items"] for item in result] == [[1], [2]]
