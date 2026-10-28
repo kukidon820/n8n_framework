@@ -100,3 +100,15 @@ def test_module_names_stable_when_node_list_reordered(tmp_path):
     assert names == {p.name for p in (second_output / "python_nodes").glob("*.py")}
     assert len(names) == 3
     assert all(name == "__init__.py" or name.startswith("my_node_") for name in names)
+
+
+@pytest.mark.parametrize("kind", ["n8n-nodes-base.scheduleTrigger", "n8n-nodes-base.webhook", "n8n-nodes-base.manualTrigger"])
+def test_triggers_are_skipped_and_input_is_manual(tmp_path, kind):
+    workflow = {"nodes": [
+        {"id": "1", "name": "Start", "type": kind, "parameters": {}},
+        {"id": "2", "name": "Process", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "return _items"}},
+    ], "connections": {"Start": {"main": [[{"node": "Process", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "out"
+    generate_project(workflow, output)
+    result = subprocess.run([sys.executable, "-c", "import main; assert main.run([{'json': {'x': 1}}]) == [{'json': {'x': 1}}]"], cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
