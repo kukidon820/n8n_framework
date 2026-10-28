@@ -18,7 +18,8 @@ def http_credential_fields(node: dict[str, Any]) -> dict[str, str]:
         return {}
     kind = params.get("genericAuthType")
     fields = {"httpBasicAuth": ("USERNAME", "PASSWORD"), "httpBearerAuth": ("TOKEN",),
-              "httpHeaderAuth": ("HEADER_NAME", "HEADER_VALUE")}
+              "httpHeaderAuth": ("HEADER_NAME", "HEADER_VALUE"),
+              "httpQueryAuth": ("NAME", "VALUE")}
     if kind not in fields:
         raise WorkflowError(f"Узел {node.get('name')}: неподдерживаемый тип HTTP credentials {kind!r}")
     credentials = node.get("credentials", {})
@@ -55,11 +56,17 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     if not isinstance(method, str) or not method.isalpha():
         raise WorkflowError(f"Узел {name}: некорректный HTTP-метод")
     options = p.get("options", {})
-    if not isinstance(options, dict) or set(options) - {"timeout", "response", "batching", "allowUnauthorizedCerts", "redirect", "proxy", "lowercaseHeaders", "webdavMethods", "pagination"}:
+    if not isinstance(options, dict) or set(options) - {"timeout", "response", "batching", "allowUnauthorizedCerts", "redirect", "proxy", "lowercaseHeaders", "webdavMethods", "pagination", "sendCredentialsOnCrossOriginRedirect"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые HTTP options")
-    for key in ("allowUnauthorizedCerts", "lowercaseHeaders", "webdavMethods"):
+    for key in ("allowUnauthorizedCerts", "lowercaseHeaders", "webdavMethods", "sendCredentialsOnCrossOriginRedirect"):
         if key in options and not isinstance(options[key], bool):
             raise WorkflowError(f"Узел {name}: {key} должен быть логическим")
+    method = method.upper()
+    regular_methods = {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
+    webdav_methods = {"COPY", "MKCOL", "MOVE", "PROPFIND", "REPORT"}
+    if method not in regular_methods and not (method in webdav_methods and options.get("webdavMethods", False)):
+        raise WorkflowError(f"Узел {name}: метод {method!r} требует включить Enable WebDAV Methods")
+    send_credentials_cross_origin = options.get("sendCredentialsOnCrossOriginRedirect", False)
     redirect = options.get("redirect")
     if redirect is not None and (not isinstance(redirect, dict) or set(redirect) != {"redirect"} or not isinstance(redirect["redirect"], dict) or set(redirect["redirect"]) - {"followRedirects", "maxRedirects"}):
         raise WorkflowError(f"Узел {name}: некорректные настройки redirect")
@@ -281,6 +288,9 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
             auth_code += f'        headers["Authorization"] = "Bearer " + config.{credential_fields["TOKEN"]}\n'
         elif generic_type == "httpHeaderAuth":
             auth_code += f'        headers[config.{credential_fields["HEADER_NAME"]}] = config.{credential_fields["HEADER_VALUE"]}\n'
+    query_auth_code = ""
+    if generic_type == "httpQueryAuth":
+        query_auth_code = f'        page_params[config.{credential_fields["NAME"]}] = config.{credential_fields["VALUE"]}\n'
     json_output = 'value = response.json() if response.content.strip() else {}\n            values = value if isinstance(value, list) else [value]\n            result.extend({"json": value if value is not None else {}} for value in values)'
     text_output = f'result.append({{"json": {{{output_property!r}: response.text}}}})'
     file_output = f'''binary = dict(item.get("binary", {{}}))
@@ -308,9 +318,19 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     if generic_type == "httpBasicAuth":
         client_options += f', auth=(config.{credential_fields["USERNAME"]}, config.{credential_fields["PASSWORD"]})'
     redirect_guard = ""
-    if follow and (gmail or credential_fields):
-        secret_header = f'config.{credential_fields["HEADER_NAME"]}' if generic_type == "httpHeaderAuth" else '"Authorization"'
-        redirect_guard = f'''        def origin(url):
+    if follow and (gmail or credential_fields) and not send_credentials_cross_origin:
+        if generic_type == "httpQueryAuth":
+            redirect_guard = f'''        def origin(url):
+            parts = urlsplit(str(url))
+            return (parts.scheme.lower(), parts.hostname, parts.port or (443 if parts.scheme.lower() == "https" else 80))
+        original_origin = origin(request_url)
+        def strip_credentials_on_redirect(request):
+            if origin(request.url) != original_origin:
+                request.url = request.url.copy_with(params=request.url.params.remove(config.{credential_fields["NAME"]}))
+'''
+        else:
+            secret_header = f'config.{credential_fields["HEADER_NAME"]}' if generic_type == "httpHeaderAuth" else '"Authorization"'
+            redirect_guard = f'''        def origin(url):
             parts = urlsplit(str(url))
             return (parts.scheme.lower(), parts.hostname, parts.port or (443 if parts.scheme.lower() == "https" else 80))
         original_origin = origin(request_url)
@@ -321,7 +341,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         client_options += ', event_hooks={"request": [strip_credentials_on_redirect]}'
     throttle = f'        if item_index and item_index % {batch_size} == 0:\n            time.sleep({batch_interval / 1000!r})\n' if batch_size > 0 and batch_interval > 0 else ''
     lowercase = '        headers = {key.lower(): value for key, value in headers.items()}\n' if options.get("lowercaseHeaders", True) else ''
-    request_block = f'''        with httpx.Client({client_options}) as client:
+    request_block = f'''{query_auth_code}        with httpx.Client({client_options}) as client:
             for attempt in range({tries}):
                 try:
                     response = client.request({method.upper()!r}, request_url, params=page_params, headers=headers{body_argument})

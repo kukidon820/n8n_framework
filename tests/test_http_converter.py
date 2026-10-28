@@ -170,6 +170,70 @@ def test_auth_is_removed_on_http_to_https_redirect(monkeypatch, kind, values):
     assert "authorization" not in requests[1].headers
 
 
+def test_generic_query_auth_uses_config_and_is_removed_cross_origin(monkeypatch):
+    import httpx
+
+    requests = []
+    real_client = httpx.Client
+
+    def handle(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(302, headers={"Location": "https://other.example/path"})
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    node = {"name": "API", "parameters": {"url": "https://example.com", "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth", "options": {"response": {"response": {"responseFormat": "json"}}}},
+        "credentials": {"httpQueryAuth": {"id": "query-credential"}}}
+    fields = http_credential_fields(node)
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields["NAME"]: "api_key", fields["VALUE"]: "secret"}))
+    namespace = {}
+    source = generate_http_node(node, "request")
+    assert "secret" not in source
+    exec(source, namespace)
+    namespace["request"]([{"json": {}}], {}, {})
+    assert requests[0].url.params["api_key"] == "secret"
+    assert "api_key" not in requests[1].url.params
+
+
+def test_cross_origin_credentials_can_be_explicitly_enabled(monkeypatch):
+    import httpx
+
+    requests = []
+    real_client = httpx.Client
+    transport = httpx.MockTransport(lambda request: (
+        requests.append(request),
+        httpx.Response(302, headers={"Location": "https://other.example/path"}) if len(requests) == 1 else httpx.Response(200, json={}),
+    )[1])
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    node = {"name": "API", "typeVersion": 4.4, "parameters": {"url": "https://example.com",
+        "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
+        "options": {"sendCredentialsOnCrossOriginRedirect": True,
+                    "response": {"response": {"responseFormat": "json"}}}},
+        "credentials": {"httpHeaderAuth": {"id": "id"}}}
+    fields = http_credential_fields(node)
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields["HEADER_NAME"]: "X-API-Key", fields["HEADER_VALUE"]: "secret"}))
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    namespace["request"]([{"json": {}}], {}, {})
+    assert requests[1].headers["x-api-key"] == "secret"
+
+
+@pytest.mark.parametrize("method,webdav,accepted", [
+    ("GET", False, True), ("PROPFIND", False, False), ("PROPFIND", True, True), ("TRACE", True, False),
+])
+def test_webdav_methods_require_explicit_option(method, webdav, accepted):
+    node = {"name": "HTTP", "parameters": {"url": "https://example.com", "method": method,
+        "options": {"webdavMethods": webdav}}}
+    if accepted:
+        assert "def request" in generate_http_node(node, "request")
+    else:
+        with pytest.raises(WorkflowError, match="WebDAV"):
+            generate_http_node(node, "request")
+
+
 def test_generated_config_contains_only_placeholders(tmp_path):
     node = {"id": "node", "name": "API", "type": "n8n-nodes-base.httpRequest", "parameters": {
         "url": "https://example.com", "authentication": "genericCredentialType", "genericAuthType": "httpBearerAuth",
