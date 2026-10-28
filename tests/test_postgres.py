@@ -41,7 +41,7 @@ def test_parameters_are_bound_not_interpolated(monkeypatch):
     exec(code, namespace)
     malicious = "x'; DROP TABLE users; --"
     assert namespace["run"]([{"json": {"email": malicious}}], {}, {}) == [{"json": {"id": "123456789012345678"}}]
-    assert calls == [("SELECT id FROM users WHERE email = %(value)s", {"value": malicious})]
+    assert calls == [("SELECT id FROM users WHERE email = %(p1)s", {"p1": malicious})]
 
 
 def test_generator_adds_database_config(tmp_path):
@@ -61,3 +61,31 @@ def test_unsafe_query_and_unsupported_batching_fail():
     node["parameters"]["options"]["queryBatching"] = "single"
     with pytest.raises(WorkflowError, match="независимое"):
         generate_postgres_node(node, "run")
+
+
+def test_multiple_parameters_are_bound_separately(monkeypatch):
+    calls = []
+    class Cursor:
+        description = []
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, query, params): calls.append((query, params))
+        def fetchall(self): return []
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def cursor(self): return Cursor()
+    database = ModuleType("database")
+    database.__path__ = []
+    postgres = ModuleType("database.postgres")
+    postgres.connect = lambda timeout: Connection()
+    monkeypatch.setitem(sys.modules, "database", database)
+    monkeypatch.setitem(sys.modules, "database.postgres", postgres)
+    node = postgres_node()
+    node["parameters"]["query"] = "SELECT id FROM users WHERE id = $1 AND email = $2"
+    node["parameters"]["options"]["queryReplacement"] = "={{ [$json.id, $json.email] }}"
+    code, _ = generate_postgres_node(node, "run")
+    namespace = {}
+    exec(code, namespace)
+    namespace["run"]([{"json": {"id": 7, "email": "a,b'"}}], {}, {})
+    assert calls == [("SELECT id FROM users WHERE id = %(p1)s AND email = %(p2)s", {"p1": 7, "p2": "a,b'"})]

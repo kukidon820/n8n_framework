@@ -22,7 +22,7 @@ def connect(timeout):
 
 
 def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
-    """Поддержать независимый SELECT с одним безопасным параметром $1."""
+    """Поддержать независимый SELECT с безопасной привязкой параметров."""
     name = node.get("name", "<без имени>")
     p = node.get("parameters", {})
     if set(p) - {"resource", "operation", "query", "options"} or p.get("resource", "database") != "database" or p.get("operation") != "executeQuery":
@@ -36,18 +36,18 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
     query = p.get("query")
     if not isinstance(query, str) or not re.match(r"\s*SELECT\b", query, re.I) or not re.fullmatch(r"[a-zA-Z0-9_\s.,()*=<>!+$-]+;?\s*", query) or "--" in query:
         raise WorkflowError(f"Узел {name}: поддерживается простой SELECT без выражений, комментариев и литералов")
-    tokens = re.findall(r"\$\d+", query)
-    if any(token != "$1" for token in tokens) or "$" in re.sub(r"\$1(?!\d)", "", query):
-        raise WorkflowError(f"Узел {name}: поддерживается только параметр $1")
+    tokens = re.findall(r"\$(\d+)", query)
+    if any(int(token) < 1 or token.startswith("0") for token in tokens) or "$" in re.sub(r"\$\d+", "", query):
+        raise WorkflowError(f"Узел {name}: некорректный параметр SQL")
     replacement = options.get("queryReplacement", "")
     if tokens:
         if not isinstance(replacement, str) or not re.fullmatch(r"=\s*{{\s*[^{}]+\s*}}", replacement):
-            raise WorkflowError(f"Узел {name}: для $1 требуется одно выражение queryReplacement")
+            raise WorkflowError(f"Узел {name}: для параметров SQL требуется одно выражение queryReplacement")
         expression = compile_expression(replacement, node=name, parameter="options.queryReplacement")
         value = expression.code
         dependencies = set(expression.dependencies)
-        query = re.sub(r"\$1(?!\d)", "%(value)s", query)
-        arguments = '{"value": parameter}'
+        query = re.sub(r"\$(\d+)", lambda match: f'%(p{match.group(1)})s', query)
+        arguments = 'parameters'
     else:
         if replacement:
             raise WorkflowError(f"Узел {name}: queryReplacement задан без $1")
@@ -57,9 +57,15 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
     number_format = options.get("largeNumbersOutput", "text")
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1 or number_format != "text":
         raise WorkflowError(f"Узел {name}: некорректные настройки подключения или чисел")
-    parameter_code = (f'        parameter = {value}\n'
-                      '        if parameter is not None and not isinstance(parameter, (str, int, float, bool)):\n'
-                      '            raise TypeError("Параметр PostgreSQL должен быть скалярным")\n') if tokens else ''
+    parameter_code = (f'        parameter_values = {value}\n'
+                      '        if not isinstance(parameter_values, list):\n            parameter_values = [parameter_values]\n'
+                      f'        if len(parameter_values) < {max(map(int, tokens))}:\n            raise ValueError("Недостаточно параметров PostgreSQL")\n'
+                      '        parameters = {}\n'
+                      '        for index, parameter in enumerate(parameter_values, 1):\n'
+                      '            if isinstance(parameter, (dict, list)):\n                parameter = json.dumps(parameter, ensure_ascii=False, separators=(",", ":"))\n'
+                      '            elif parameter is not None and not isinstance(parameter, (str, int, float, bool)):\n'
+                      '                raise TypeError("Неподдерживаемый параметр PostgreSQL")\n'
+                      '            parameters[f"p{index}"] = parameter\n') if tokens else ''
     source = f'''import json
 from database.postgres import connect
 

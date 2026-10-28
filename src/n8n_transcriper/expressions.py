@@ -65,6 +65,15 @@ def _expression(value: str) -> Expression:
     if value.startswith("JSON.stringify(") and value.endswith(")"):
         inner = _expression(value[len("JSON.stringify("):-1])
         return Expression(f"json.dumps({inner.code}, ensure_ascii=False, separators=(',', ':'))", inner.dependencies)
+    if value.startswith("[") and value.endswith("]"):
+        inside = value[1:-1].strip()
+        parts = [_expression(part) for part in _split_top_level(inside, ",")] if inside else []
+        return Expression("[" + ", ".join(part.code for part in parts) + "]",
+                          frozenset().union(*(part.dependencies for part in parts)))
+    if value in {"true", "false", "null"}:
+        return Expression({"true": "True", "false": "False", "null": "None"}[value], frozenset())
+    if re.fullmatch(r"-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?", value):
+        return Expression(value, frozenset())
     if value.startswith("{") and value.endswith("}"):
         entries = []
         dependencies: set[str] = set()
