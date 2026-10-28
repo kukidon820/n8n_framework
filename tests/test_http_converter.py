@@ -228,3 +228,35 @@ def test_multipart_is_serialized_by_httpx_without_network(monkeypatch):
     assert requests[0].headers["content-type"].startswith("multipart/form-data; boundary=")
     assert b'filename="a.txt"' in requests[0].content
     assert b"actual bytes" in requests[0].content
+
+
+def test_pagination_fetches_pages_until_empty(monkeypatch):
+    import httpx
+    requests = []
+    sleeps = []
+    real_client = httpx.Client
+    def handle(request):
+        requests.append(request)
+        page = int(request.url.params["page"])
+        return httpx.Response(200, json=[{"page": page}] if page < 3 else [])
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    node = {"name": "Pages", "parameters": {"url": "https://example.com/items", "options": {
+        "response": {"response": {"responseFormat": "json"}},
+        "pagination": {"pagination": {"paginationMode": "updateAParameterInEachRequest",
+            "parameters": {"parameters": [{"type": "qs", "name": "page", "value": "={{ $pageCount + 1 }}"}]},
+            "paginationCompleteWhen": "responseIsEmpty", "limitPagesFetched": True, "maxRequests": 5,
+            "requestInterval": 200}}}}}
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    assert namespace["request"]([{"json": {}}], {}, {}) == [{"json": {"page": 1}}, {"json": {"page": 2}}]
+    assert [int(req.url.params["page"]) for req in requests] == [1, 2, 3]
+    assert sleeps == [0.2, 0.2]
+
+
+def test_pagination_requires_supported_completion():
+    node = {"name": "Pages", "parameters": {"url": "https://example.com", "options": {
+        "pagination": {"pagination": {"paginationMode": "responseContainsNextURL"}}}}}
+    with pytest.raises(WorkflowError, match="pagination"):
+        generate_http_node(node, "request")

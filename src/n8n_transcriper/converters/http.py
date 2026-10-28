@@ -2,6 +2,8 @@
 
 import hashlib
 import keyword
+import re
+import textwrap
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -53,7 +55,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     if not isinstance(method, str) or not method.isalpha():
         raise WorkflowError(f"Узел {name}: некорректный HTTP-метод")
     options = p.get("options", {})
-    if not isinstance(options, dict) or set(options) - {"timeout", "response", "batching", "allowUnauthorizedCerts", "redirect", "proxy", "lowercaseHeaders", "webdavMethods"}:
+    if not isinstance(options, dict) or set(options) - {"timeout", "response", "batching", "allowUnauthorizedCerts", "redirect", "proxy", "lowercaseHeaders", "webdavMethods", "pagination"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые HTTP options")
     for key in ("allowUnauthorizedCerts", "lowercaseHeaders", "webdavMethods"):
         if key in options and not isinstance(options[key], bool):
@@ -92,6 +94,32 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     response_format = response.get("responseFormat", "autodetect")
     if response_format not in ("json", "text", "file", "autodetect"):
         raise WorkflowError(f"Узел {name}: неподдерживаемый формат ответа {response_format!r}")
+    page_settings = options.get("pagination")
+    page_config = None
+    if page_settings is not None:
+        if not isinstance(page_settings, dict) or set(page_settings) != {"pagination"} or not isinstance(page_settings["pagination"], dict):
+            raise WorkflowError(f"Узел {name}: некорректная pagination")
+        page_config = page_settings["pagination"]
+        allowed_page = {"paginationMode", "parameters", "paginationCompleteWhen", "limitPagesFetched", "maxRequests", "requestInterval"}
+        if set(page_config) - allowed_page or page_config.get("paginationMode") != "updateAParameterInEachRequest" or page_config.get("paginationCompleteWhen", "responseIsEmpty") != "responseIsEmpty":
+            raise WorkflowError(f"Узел {name}: неподдерживаемый режим pagination")
+        if method.upper() != "GET" or p.get("sendBody", False) or response_format != "json":
+            raise WorkflowError(f"Узел {name}: pagination поддерживает GET с JSON-ответом")
+        group = page_config.get("parameters", {})
+        if not isinstance(group, dict) or set(group) != {"parameters"} or not isinstance(group["parameters"], list) or len(group["parameters"]) != 1:
+            raise WorkflowError(f"Узел {name}: pagination требует один параметр query")
+        entry = group["parameters"][0]
+        if not isinstance(entry, dict) or set(entry) != {"type", "name", "value"} or entry.get("type") != "qs" or not isinstance(entry.get("name"), str) or not entry["name"]:
+            raise WorkflowError(f"Узел {name}: некорректный параметр pagination")
+        value = entry.get("value")
+        if not isinstance(value, str) or not re.fullmatch(r"=?\s*{{\s*\$pageCount\s*(?:\+\s*1\s*)?}}", value):
+            raise WorkflowError(f"Узел {name}: поддерживается только $pageCount или $pageCount + 1")
+        page_offset = 1 if "+" in value else 0
+        page_name = entry["name"]
+        max_pages = page_config.get("maxRequests", 100)
+        page_interval = page_config.get("requestInterval", 0)
+        if page_config.get("limitPagesFetched") is not True or not isinstance(max_pages, int) or isinstance(max_pages, bool) or max_pages < 1 or not isinstance(page_interval, (float, int)) or isinstance(page_interval, bool) or page_interval < 0:
+            raise WorkflowError(f"Узел {name}: для pagination требуется положительный предел страниц и корректный интервал")
     output_property = response.get("outputPropertyName", "data")
     if not isinstance(output_property, str) or not output_property or "." in output_property:
         raise WorkflowError(f"Узел {name}: некорректное имя поля ответа")
@@ -266,6 +294,34 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         client_options += ', event_hooks={"request": [strip_credentials_on_redirect]}'
     throttle = f'        if item_index and item_index % {batch_size} == 0:\n            time.sleep({batch_interval / 1000!r})\n' if batch_size > 0 and batch_interval > 0 else ''
     lowercase = '        headers = {key.lower(): value for key, value in headers.items()}\n' if options.get("lowercaseHeaders", True) else ''
+    request_block = f'''        with httpx.Client({client_options}) as client:
+            for attempt in range({tries}):
+                try:
+                    response = client.request({method.upper()!r}, request_url, params=page_params, headers=headers{body_argument})
+                    response.raise_for_status()
+                    break
+                except httpx.HTTPError:
+                    if attempt + 1 == {tries}:
+                        raise
+                    time.sleep({delay / 1000!r})
+'''
+    output_block = f'''{detect}        if response_format == "json":
+            {json_output}
+        elif response_format == "file":
+            {file_output}
+        else:
+            {text_output}
+'''
+    if page_config is not None:
+        fetch = (f'        for page_index in range({max_pages}):\n'
+                 f'            if page_index and {page_interval!r}:\n                time.sleep({page_interval / 1000!r})\n'
+                 f'            page_params = dict({params})\n            page_params[{page_name!r}] = page_index + {page_offset}\n' +
+                 textwrap.indent(request_block, '    ') +
+                 '            page_data = response.json() if response.content.strip() else []\n'
+                 '            if not isinstance(page_data, list):\n                raise TypeError("Pagination responseIsEmpty поддерживает только массив JSON")\n'
+                 '            if not page_data:\n                break\n' + textwrap.indent(output_block, '    '))
+    else:
+        fetch = f'        page_params = {params}\n' + request_block + output_block
     return f'''import json
 import time
 from urllib.parse import urlencode, urlsplit
@@ -281,21 +337,6 @@ def {function_name}(items, results, execution):
         headers = {headers}
         request_url = {url_code}
 {lowercase}{body}{auth_code}{redirect_guard}
-        with httpx.Client({client_options}) as client:
-            for attempt in range({tries}):
-                try:
-                    response = client.request({method.upper()!r}, request_url, params={params}, headers=headers{body_argument})
-                    response.raise_for_status()
-                    break
-                except httpx.HTTPError:
-                    if attempt + 1 == {tries}:
-                        raise
-                    time.sleep({delay / 1000!r})
-{detect}        if response_format == "json":
-            {json_output}
-        elif response_format == "file":
-            {file_output}
-        else:
-            {text_output}
+{fetch}
     return result
 '''
