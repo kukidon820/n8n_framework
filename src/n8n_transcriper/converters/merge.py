@@ -76,8 +76,8 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
             if not isinstance(value, str):
                 raise WorkflowError(f"Узел {name}: некорректные поля сопоставления")
             fields = [(field.strip(), field.strip()) for field in value.split(",")]
-        if not fields or any(not isinstance(a, str) or not isinstance(b, str) or not a or not b or any(c in a + b for c in ".[") for a, b in fields):
-            raise WorkflowError(f"Узел {name}: поддерживаются только простые имена полей")
+        if not fields or any(not isinstance(a, str) or not isinstance(b, str) or not a or not b or "[" in a + b or any(not part for field in (a, b) for part in field.split(".")) for a, b in fields):
+            raise WorkflowError(f"Узел {name}: некорректный путь поля сопоставления")
         if resolution == "preferLast" and "resolveClash" not in clash and join_mode == "enrichInput2":
             resolution = "preferInput1"
         pairs = f'''    if not inputs[0] or not inputs[1]:
@@ -91,7 +91,7 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     matched_right = set()
     for left_index, first in enumerate(inputs[0]):
         for right_index, second in enumerate(inputs[1]):
-            if all(a in first["json"] and b in second["json"] and same_value(first["json"][a], second["json"][b]) for a, b in {fields!r}):
+            if all(match_field(first["json"], second["json"], a, b, {options.get('disableDotNotation', False)!r}) for a, b in {fields!r}):
                 matched_pairs.append((left_index, right_index))
                 matched_left.add(left_index)
                 matched_right.add(right_index)
@@ -147,6 +147,24 @@ def same_value(left, right):
     if isinstance(left, list):
         return len(left) == len(right) and all(same_value(a, b) for a, b in zip(left, right))
     return left == right
+
+
+def field_value(data, name, literal):
+    current = data
+    for key in [name] if literal else name.split("."):
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        elif isinstance(current, list) and key.isdigit() and int(key) < len(current):
+            current = current[int(key)]
+        else:
+            return False, None
+    return True, current
+
+
+def match_field(left, right, first, second, literal):
+    left_exists, left_value = field_value(left, first, literal)
+    right_exists, right_value = field_value(right, second, literal)
+    return left_exists and right_exists and same_value(left_value, right_value)
 
 
 def merge_values(target, source, deep=True, skip_empty=False):

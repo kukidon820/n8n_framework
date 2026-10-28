@@ -116,3 +116,11 @@ def test_combine_join_modes(mode, expected):
     assert actual == expected
     if mode == "keepNonMatches":
         assert [entry["json"]["_source"] for entry in result] == ["input1", "input2"]
+
+
+def test_combine_by_nested_or_literal_dot_fields():
+    nested = make_combine("combineByFields", fieldsToMatchString="person.id")
+    assert len(nested([[{"json": {"person": {"id": 4}}}], [{"json": {"person": {"id": 4}}}]])) == 1
+    literal = make_combine("combineByFields", {"disableDotNotation": True}, fieldsToMatchString="person.id")
+    assert len(literal([[{"json": {"person.id": 4}}], [{"json": {"person.id": 4}}]])) == 1
+    assert literal([[{"json": {"person": {"id": 4}}}], [{"json": {"person": {"id": 4}}}]]) == []
