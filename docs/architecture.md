@@ -14,6 +14,8 @@
 
 AI-соединение `ai_languageModel` связывает подключённую chat-модель с Agent и не становится отдельным последовательным вызовом. Для агента без инструментов генерируется HTTP-вызов OpenAI-compatible Chat Completions API; адрес и credentials находятся в `config.py`. Неизвестные дополнительные каналы и неподдерживаемые графы отклоняются с `WorkflowError`.
 
+HTTP Request к Gmail `users/me/messages/send` генерирует SMTP-отправитель в отдельном `email_senders/` модуле. Он декодирует подготовленное MIME-сообщение и отправляет его через STARTTLS с `SMTP_USERNAME` и паролем приложения. Другие Gmail API запросы остаются HTTP-вызовами с OAuth2.
+
 ## Структура исходного пакета
 
 ```text

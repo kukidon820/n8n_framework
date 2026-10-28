@@ -15,7 +15,7 @@
 - `updateAParameterInEachRequest` с `$pageCount` или `$pageCount + 1` и остановкой на пустом массиве;
 - `responseContainsNextURL` с выражением `nextURL` и условием остановки по тому же полю ответа.
 
-Поддерживаются generic credentials Basic, Bearer, Header и Query, а также Gmail OAuth2. Credentials хранятся в `config.py` через переменные окружения. При редиректе на другой origin они не передаются, если `sendCredentialsOnCrossOriginRedirect` явно не включён.
+Поддерживаются generic credentials Basic, Bearer, Header и Query, а также Gmail OAuth2. HTTP Request к `https://gmail.googleapis.com/gmail/v1/users/me/messages/send` преобразуется в SMTP-отправку подготовленного MIME-письма. Для Gmail используются `SMTP_USERNAME` и `SMTP_APP_PASSWORD`; по умолчанию сервер — `smtp.gmail.com:587` с STARTTLS. Остальные Gmail API запросы продолжают использовать `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` и `GMAIL_REFRESH_TOKEN`. Значения читаются из окружения и не записываются в код. При HTTP-редиректе на другой origin credentials не передаются, если `sendCredentialsOnCrossOriginRedirect` явно не включён.
 
 Другие predefined credential types, generic OAuth2/OAuth1 и digest auth требуют отдельной реализации. Секреты в статических параметрах заголовков не принимаются как способ авторизации.
 

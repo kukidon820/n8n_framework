@@ -15,6 +15,7 @@ from n8n_transcriper.converters.files import generate_file_node
 from n8n_transcriper.converters.http import generate_http_node, http_credential_fields
 from n8n_transcriper.converters.merge import generate_merge_node
 from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgres_node
+from n8n_transcriper.converters.smtp import generate_smtp_node, is_gmail_send_node
 from n8n_transcriper.graph import connections, execution_order
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
@@ -116,6 +117,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     completed: set[str] = set()
     ai_model_configs: dict[str, dict[str, Any]] = {}
     uses_gmail = False
+    uses_smtp = False
     http_credentials: set[str] = set()
     http_credential_descriptions: dict[str, set[str]] = {}
     postgres_credential = None
@@ -153,36 +155,42 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             source = generate_file_node(node, function)
             arguments = "items"
         elif kind == "n8n-nodes-base.httpRequest":
-            folder = "http_requests"
-            source = generate_http_node(node, function)
-            credential_fields = http_credential_fields(node)
-            http_credentials.update(credential_fields.values())
-            credential_type = node.get("parameters", {}).get("genericAuthType", "HTTP")
-            credentials = node.get("credentials", {})
-            credential = credentials.get(credential_type, {}) if isinstance(credentials, dict) else {}
-            credential_label = credential.get("name", credential_type) if isinstance(credential, dict) else credential_type
-            field_labels = {
-                "USERNAME": "имя пользователя", "PASSWORD": "пароль", "TOKEN": "Bearer token",
-                "HEADER_NAME": "имя заголовка", "HEADER_VALUE": "значение заголовка",
-                "NAME": "имя query-параметра", "VALUE": "значение query-параметра",
-            }
-            for field, key in credential_fields.items():
-                description = f"HTTP-узел «{name}», credential «{credential_label}»: {field_labels[field]}"
-                http_credential_descriptions.setdefault(key, set()).add(description)
-            params = node["parameters"]
-            values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody")), ("body", params.get("body"))]
-            for key in ("headerParameters", "queryParameters", "bodyParameters"):
-                values.extend((key, pair.get("value")) for pair in params.get(key, {}).get("parameters", []))
-            references = set()
-            for parameter, value in values:
-                if isinstance(value, str):
-                    references.update(compile_expression(value, node=name, parameter=parameter).dependencies)
+            params = node.get("parameters", {})
+            smtp_gmail = is_gmail_send_node(node)
+            if smtp_gmail:
+                folder = "email_senders"
+                source, references = generate_smtp_node(node, function)
+                uses_smtp = True
+            else:
+                folder = "http_requests"
+                source = generate_http_node(node, function)
+                credential_fields = http_credential_fields(node)
+                http_credentials.update(credential_fields.values())
+                credential_type = params.get("genericAuthType", "HTTP")
+                credentials = node.get("credentials", {})
+                credential = credentials.get(credential_type, {}) if isinstance(credentials, dict) else {}
+                credential_label = credential.get("name", credential_type) if isinstance(credential, dict) else credential_type
+                field_labels = {
+                    "USERNAME": "имя пользователя", "PASSWORD": "пароль", "TOKEN": "Bearer token",
+                    "HEADER_NAME": "имя заголовка", "HEADER_VALUE": "значение заголовка",
+                    "NAME": "имя query-параметра", "VALUE": "значение query-параметра",
+                }
+                for field, key in credential_fields.items():
+                    description = f"HTTP-узел «{name}», credential «{credential_label}»: {field_labels[field]}"
+                    http_credential_descriptions.setdefault(key, set()).add(description)
+                values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody")), ("body", params.get("body"))]
+                for key in ("headerParameters", "queryParameters", "bodyParameters"):
+                    values.extend((key, pair.get("value")) for pair in params.get(key, {}).get("parameters", []))
+                references = set()
+                for parameter, value in values:
+                    if isinstance(value, str):
+                        references.update(compile_expression(value, node=name, parameter=parameter).dependencies)
+                dependencies.add("httpx>=0.27")
+                uses_gmail |= params.get("nodeCredentialType") == "gmailOAuth2"
             missing = references - (completed & ancestors[name] if branching else completed)
             if missing:
                 raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
             arguments = "items, results, execution"
-            dependencies.add("httpx>=0.27")
-            uses_gmail |= node.get("parameters", {}).get("nodeCredentialType") == "gmailOAuth2"
         elif kind == "n8n-nodes-base.set":
             folder = "operations"
             source, references = generate_edit_fields(node, function)
@@ -424,6 +432,15 @@ def _clean_items(items):
                    'GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\n'
                    'GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")\n'
                    'GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")\n')
+    if uses_smtp:
+        config += ('\n# SMTP Gmail: используйте полный адрес и пароль приложения, не пароль аккаунта.\n'
+                   'SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")\n'
+                   'SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))\n'
+                   'SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")\n'
+                   'SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD", "")\n'
+                   'SMTP_FROM = os.getenv("SMTP_FROM", "")\n'
+                   'SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}\n'
+                   'SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "true").lower() in {"1", "true", "yes"}\n')
     for key in sorted(http_credentials):
         for description in sorted(http_credential_descriptions.get(key, set())):
             config += f'\n# {description}.\n'
@@ -444,6 +461,8 @@ def _clean_items(items):
             required.append(f"{prefix}_API_URL")
     if uses_gmail:
         required.extend(["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"])
+    if uses_smtp:
+        required.extend(["SMTP_USERNAME", "SMTP_APP_PASSWORD"])
     required.extend(sorted(http_credentials))
     if postgres_credential is not None:
         required.extend(["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"])
@@ -460,6 +479,8 @@ def _clean_items(items):
         + ('AI Agent без инструментов выполняется прямым HTTP-запросом к OpenAI-compatible Chat Completions API. '
            'Провайдер задаётся значениями `*_API_URL`, `*_API_KEY`, `*_API_KEY_HEADER`, `*_API_KEY_PREFIX`, `*_MODEL` и `*_OPTIONS` в `config.py`.\n\n'
            if ai_model_configs else '')
+        + ('Отправка через Gmail настроена по SMTP: `smtp.gmail.com:587` с STARTTLS. Укажите `SMTP_USERNAME` (полный адрес) и `SMTP_APP_PASSWORD` (пароль приложения), не обычный пароль аккаунта. Пароль приложения создаётся в Google Account: https://myaccount.google.com/apppasswords; для этого должна быть включена двухэтапная аутентификация.\n\n'
+           if uses_smtp else '')
         +
         'PowerShell: `$env:ИМЯ_ПЕРЕМЕННОЙ = "значение"`. Linux/macOS: `export ИМЯ_ПЕРЕМЕННОЙ="значение"`.\n\n'
         '## Запуск\n\n'
