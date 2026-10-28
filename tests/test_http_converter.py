@@ -139,3 +139,50 @@ def test_generated_config_contains_only_placeholders(tmp_path):
     config = (output / "config.py").read_text(encoding="utf-8")
     assert f'{field} = os.getenv(' in config
     assert field in (output / "README.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("body_parameters,expected", [
+    ({"contentType": "form-urlencoded", "bodyParameters": {"parameters": [{"name": "name", "value": "={{ $json.name }}"}]}}, ("content", b"name=A%26B")),
+    ({"contentType": "json", "bodyParameters": {"parameters": [{"name": "name", "value": "={{ $json.name }}"}]}}, ("content", b'{"name": "A&B"}')),
+    ({"contentType": "raw", "body": "={{ $json.name }}", "rawContentType": "text/plain"}, ("content", b"A&B")),
+    ({"contentType": "binaryData", "inputDataFieldName": "file"}, ("content", b"hello")),
+    ({"contentType": "multipart-form-data", "bodyParameters": {"parameters": [
+        {"name": "text", "value": "={{ $json.name }}"},
+        {"name": "upload", "parameterType": "formBinaryData", "inputDataFieldName": "file"}]}},
+        ("files", [("text", (None, "A&B")), ("upload", ("a.txt", b"hello", "text/plain"))])),
+])
+def test_request_body_formats(monkeypatch, body_parameters, expected):
+    calls = []
+    class Client:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def request(self, method, url, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(raise_for_status=lambda: None, content=b"{}", json=lambda: {})
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=Exception))
+    params = {"url": "https://example.com", "method": "POST", "sendBody": True,
+              "options": {"response": {"response": {"responseFormat": "json"}}}, **body_parameters}
+    namespace = {}
+    exec(generate_http_node({"name": "HTTP", "parameters": params}, "request"), namespace)
+    item = {"json": {"name": "A&B"}, "binary": {"file": {"data": b"hello", "fileName": "a.txt", "mimeType": "text/plain"}}}
+    namespace["request"]([item], {}, {})
+    assert calls[0][expected[0]] == expected[1]
+
+
+def test_multipart_is_serialized_by_httpx_without_network(monkeypatch):
+    import httpx
+    requests = []
+    real_client = httpx.Client
+    transport = httpx.MockTransport(lambda request: (requests.append(request), httpx.Response(200, json={}))[1])
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    node = {"name": "Upload", "parameters": {"url": "https://example.com", "method": "POST", "sendBody": True,
+        "contentType": "multipart-form-data", "bodyParameters": {"parameters": [
+            {"name": "upload", "parameterType": "formBinaryData", "inputDataFieldName": "file"}]},
+        "options": {"response": {"response": {"responseFormat": "json"}}}}}
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    namespace["request"]([{"json": {}, "binary": {"file": {"data": b"actual bytes", "fileName": "a.txt", "mimeType": "text/plain"}}}], {}, {})
+    assert requests[0].headers["content-type"].startswith("multipart/form-data; boundary=")
+    assert b'filename="a.txt"' in requests[0].content
+    assert b"actual bytes" in requests[0].content

@@ -34,7 +34,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
         raise WorkflowError(f"Узел {name}: некорректное имя функции")
     p = node.get("parameters", {})
-    allowed = {"method", "url", "options", "authentication", "nodeCredentialType", "genericAuthType", "sendQuery", "queryParameters", "sendHeaders", "headerParameters", "sendBody", "specifyBody", "jsonBody"}
+    allowed = {"method", "url", "options", "authentication", "nodeCredentialType", "genericAuthType", "sendQuery", "queryParameters", "sendHeaders", "headerParameters", "sendBody", "specifyBody", "jsonBody", "contentType", "bodyParameters", "body", "rawContentType", "inputDataFieldName"}
     unknown = set(p) - allowed
     if unknown:
         raise WorkflowError(f"Узел {name}: неподдерживаемые HTTP-параметры: {', '.join(sorted(unknown))}")
@@ -131,18 +131,91 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     headers = pairs("sendHeaders", "headerParameters")
     url_code = expression(url, "url")
     body = ""
+    body_argument = ""
     if p.get("sendBody", False):
-        if p.get("specifyBody") != "json" or not isinstance(p.get("jsonBody"), str):
-            raise WorkflowError(f"Узел {name}: поддерживается только JSON body")
-        body_code = expression(p["jsonBody"], "jsonBody")
-        body = f'''        body = {body_code}
-        if not isinstance(body, str):
-            raise TypeError("JSON body должен быть строкой")
-        json.loads(body)
+        content_type = p.get("contentType", "json")
+        mode = p.get("specifyBody", "keypair")
+        body_fields = {"jsonBody", "bodyParameters", "body", "rawContentType", "inputDataFieldName"}
+        allowed_body = {"json": ({"jsonBody"} if mode == "json" else {"bodyParameters"}),
+                        "form-urlencoded": {"bodyParameters"}, "multipart-form-data": {"bodyParameters"},
+                        "binaryData": {"inputDataFieldName"}, "raw": {"body", "rawContentType"}}
+        if set(p) & body_fields - allowed_body.get(content_type, set()):
+            raise WorkflowError(f"Узел {name}: поля тела не соответствуют выбранному формату")
+        if content_type == "json" and mode == "json":
+            if not isinstance(p.get("jsonBody"), str):
+                raise WorkflowError(f"Узел {name}: требуется jsonBody")
+            body_code = expression(p["jsonBody"], "jsonBody")
+            body = f'''        body = {body_code}
+        if isinstance(body, str):
+            json.loads(body)
+        else:
+            body = json.dumps(body, ensure_ascii=False)
         if not any(key.lower() == "content-type" for key in headers):
             headers["Content-Type"] = "application/json"
 '''
-    elif "jsonBody" in p or "specifyBody" in p:
+            body_argument = ', content=body.encode("utf-8")'
+        elif content_type in {"json", "form-urlencoded", "multipart-form-data"} and (content_type == "multipart-form-data" or mode == "keypair"):
+            group = p.get("bodyParameters", {"parameters": []})
+            if not isinstance(group, dict) or set(group) != {"parameters"} or not isinstance(group["parameters"], list):
+                raise WorkflowError(f"Узел {name}: некорректные bodyParameters")
+            entries = []
+            seen = set()
+            for pair in group["parameters"]:
+                if not isinstance(pair, dict) or set(pair) - {"name", "value", "parameterType", "inputDataFieldName"}:
+                    raise WorkflowError(f"Узел {name}: некорректное поле bodyParameters")
+                key = pair.get("name")
+                if not isinstance(key, str) or not key or (content_type == "json" and ('.' in key or '[' in key)):
+                    raise WorkflowError(f"Узел {name}: неподдерживаемое имя поля тела {key!r}")
+                if key in seen and content_type != "multipart-form-data":
+                    raise WorkflowError(f"Узел {name}: повторяющееся поле тела {key!r}")
+                seen.add(key)
+                kind = pair.get("parameterType", "formData")
+                if kind == "formBinaryData" and content_type == "multipart-form-data":
+                    field = pair.get("inputDataFieldName")
+                    if not isinstance(field, str) or not field or field.startswith("="):
+                        raise WorkflowError(f"Узел {name}: требуется inputDataFieldName")
+                    entries.append(f'({key!r}, (item["binary"][{field!r}].get("fileName", "file"), item["binary"][{field!r}]["data"], item["binary"][{field!r}].get("mimeType", "application/octet-stream")))')
+                elif kind == "formData" and "value" in pair:
+                    val = expression(pair["value"], f"bodyParameters.{key}")
+                    entries.append(f'({key!r}, (None, {val}))' if content_type == "multipart-form-data" else f'({key!r}, {val})')
+                else:
+                    raise WorkflowError(f"Узел {name}: неподдерживаемый тип поля {key!r}")
+            values = '[' + ', '.join(entries) + ']'
+            if content_type == "multipart-form-data":
+                if not entries:
+                    raise WorkflowError(f"Узел {name}: пустой multipart пока не поддерживается")
+                body = f'        body = {values}\n'
+                body_argument = ', files=body'
+            elif content_type == "form-urlencoded":
+                body = f'''        body = urlencode({values}, doseq=True).encode("utf-8")
+        if not any(key.lower() == "content-type" for key in headers):
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+'''
+                body_argument = ', content=body'
+            else:
+                body = f'''        body = json.dumps(dict({values}), ensure_ascii=False).encode("utf-8")
+        if not any(key.lower() == "content-type" for key in headers):
+            headers["Content-Type"] = "application/json"
+'''
+                body_argument = ', content=body'
+        elif content_type == "binaryData":
+            field = p.get("inputDataFieldName")
+            if not isinstance(field, str) or not field or field.startswith("="):
+                raise WorkflowError(f"Узел {name}: требуется inputDataFieldName")
+            body = f'''        binary_file = item["binary"][{field!r}]
+        body = binary_file["data"]
+        if not any(key.lower() == "content-type" for key in headers):
+            headers["Content-Type"] = binary_file.get("mimeType", "application/octet-stream")
+'''
+            body_argument = ', content=body'
+        elif content_type == "raw" and isinstance(p.get("body"), str) and isinstance(p.get("rawContentType"), str):
+            body = f'''        body = {expression(p['body'], 'body')}.encode("utf-8")
+        headers["Content-Type"] = {p['rawContentType']!r}
+'''
+            body_argument = ', content=body'
+        else:
+            raise WorkflowError(f"Узел {name}: неподдерживаемый формат тела {content_type!r}")
+    elif set(p) & {"jsonBody", "specifyBody", "contentType", "bodyParameters", "body", "rawContentType", "inputDataFieldName"}:
         raise WorkflowError(f"Узел {name}: тело запроса задано без sendBody")
     auth_code = '''        if not all((config.GMAIL_CLIENT_ID, config.GMAIL_CLIENT_SECRET, config.GMAIL_REFRESH_TOKEN)):
             raise ValueError("Не заданы Gmail OAuth2 credentials")
@@ -185,6 +258,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     lowercase = '        headers = {key.lower(): value for key, value in headers.items()}\n' if options.get("lowercaseHeaders", True) else ''
     return f'''import json
 import time
+from urllib.parse import urlencode
 
 import httpx
 {"import config" if gmail or credential_fields else ""}
@@ -199,7 +273,7 @@ def {function_name}(items, results, execution):
         with httpx.Client({client_options}) as client:
             for attempt in range({tries}):
                 try:
-                    response = client.request({method.upper()!r}, {url_code}, params={params}, headers=headers{', content=body.encode("utf-8")' if body else ''})
+                    response = client.request({method.upper()!r}, {url_code}, params={params}, headers=headers{body_argument})
                     response.raise_for_status()
                     break
                 except httpx.HTTPError:

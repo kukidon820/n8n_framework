@@ -16,4 +16,7 @@ build-backend = "hatchling.build"
 packages = ["src/n8n_transcriper"]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8",
+]
