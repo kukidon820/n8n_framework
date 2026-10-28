@@ -13,3 +13,5 @@ venv/
 .vscode/
 *.log
 *.md
+!README.md
+!docs/*.md

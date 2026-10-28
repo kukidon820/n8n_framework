@@ -8,12 +8,15 @@ from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
 
-POSTGRES_MODULE = '''import psycopg
+POSTGRES_MODULE = '''"""Подключение к PostgreSQL для сгенерированных узлов."""
+
+import psycopg
 from psycopg.rows import dict_row
 import config
 
 
 def connect(timeout):
+    """Открыть соединение с параметрами из config.py."""
     return psycopg.connect(
         host=config.POSTGRES_HOST, port=config.POSTGRES_PORT,
         dbname=config.POSTGRES_DATABASE, user=config.POSTGRES_USER,
@@ -90,6 +93,7 @@ from database.postgres import connect
 
 
 def execute_one(conn, item, items, results, execution):
+    """Выполнить один параметризованный запрос для входного item."""
 {parameter_code}    with conn.cursor() as cursor:
         cursor.execute({query!r}, {arguments})
         rows = cursor.fetchall() if cursor.description is not None else []
@@ -103,6 +107,7 @@ def execute_one(conn, item, items, results, execution):
 
 
 def {function_name}(items, results, execution):
+    """Выполнить SQL для items отдельно или в общей транзакции."""
     output = []
 {run_body}    return output
 '''

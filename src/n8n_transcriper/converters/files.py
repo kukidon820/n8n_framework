@@ -18,6 +18,7 @@ def generate_file_node(node: dict[str, Any], function_name: str) -> str:
         raise WorkflowError(f"Узел {name}: options должен быть объектом")
 
     def check(values: dict, allowed: set[str]) -> None:
+        """Отклонить настройки операции, семантика которых не реализована."""
         extra = set(values) - allowed
         if extra:
             raise WorkflowError(f"Узел {name}: неподдерживаемые параметры: {', '.join(sorted(extra))}")
@@ -36,6 +37,7 @@ def generate_file_node(node: dict[str, Any], function_name: str) -> str:
         output = p.get("binaryPropertyName", "data")
         bom_bytes = bytes.fromhex("efbbbf") if bom else b""
         return f'''def {function_name}(_items):
+    """Создать бинарное текстовое поле из заданного JSON-поля."""
     result = []
     for item in _items:
         content = item["json"][{field!r}].encode({encoding!r})
@@ -57,6 +59,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 def {function_name}(_items):
+    """Сжать binary-поля каждого item в ZIP-архив."""
     result = []
     for item in _items:
         buffer = BytesIO()
@@ -77,6 +80,7 @@ from zipfile import ZipFile
 
 
 def {function_name}(_items):
+    """Извлечь файлы из ZIP и сохранить их байты в binary-полях."""
     result = []
     for item in _items:
         binary = dict(item.get("binary", {{}}))
@@ -100,6 +104,7 @@ def {function_name}(_items):
 
 
 def {function_name}(_items):
+    """Преобразовать бинарное содержимое в base64-текстовое поле."""
     result = []
     for item in _items:
         value = base64.b64encode(item["binary"][{source!r}]["data"]).decode("ascii")
@@ -116,6 +121,7 @@ def {function_name}(_items):
             encoding = options.get("encoding", "utf8")
             strip = options.get("stripBOM", False)
             return f'''def {function_name}(_items):
+    """Декодировать бинарное поле в текст и добавить его в JSON."""
     result = []
     for item in _items:
         text = item["binary"][{source!r}]["data"].decode({encoding!r})

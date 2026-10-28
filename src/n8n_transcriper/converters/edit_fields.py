@@ -67,6 +67,7 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
             code = repr(value)
         lines.extend([f"        value = convert_value({code}, {field_type!r})", f"        data[{field!r}] = value"])
     helper = '''def convert_value(value, field_type):
+    """Преобразовать значение assignment к выбранному типу поля."""
     if value is None:
         return None
     if field_type == "string":
@@ -107,6 +108,7 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
     raise ValueError("Неизвестный тип поля")
 '''
     source = ('import json\nimport re\nfrom copy import deepcopy\n\n\n' + helper + '\n\n' + f'def {function_name}(items, results, execution):\n' +
+              '    """Применить Edit Fields к каждому входному item."""\n' +
               '    result = []\n    for item in items:\n' +
               f'        data = {data_code}\n' +
               ('\n'.join(lines) + '\n' if lines else '') +
