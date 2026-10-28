@@ -30,5 +30,7 @@ def test_invalid_or_unsupported_code_is_reported():
         generate_code_node({"name": "JS", "parameters": {}}, "run")
     with pytest.raises(WorkflowError, match="контекст"):
         generate_code_node(make_node("return _item"), "run")
+    with pytest.raises(WorkflowError, match="контекст"):
+        generate_code_node(make_node("return _items", mode="runOnceForEachItem"), "run")
     with pytest.raises(WorkflowError, match="ошибка Python"):
         generate_code_node(make_node("if:"), "run")

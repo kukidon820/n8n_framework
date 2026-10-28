@@ -21,6 +21,7 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def _linked_item_nodes(value: Any) -> set[str]:
+    """Найти узлы, на которые выражения ссылаются через paired-item `.item`."""
     if isinstance(value, str):
         if not value.startswith("=") and "{{" not in value:
             return set()
@@ -56,7 +57,11 @@ def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
 
 
 def generate_project(workflow: dict[str, Any], output: Path) -> None:
-    """Создать проект; неподдерживаемые схемы отклоняются до записи файлов."""
+    """Сгенерировать исполняемый Python-проект из проверенного workflow.
+
+    Все expressions разрешаются здесь, а не при запуске результата. Если
+    настройка или граф неоднозначны, ошибка возникает до создания файлов.
+    """
     edges = connections(workflow)
     nodes = {node["name"]: node for node in workflow["nodes"]}
     if not nodes:
@@ -93,6 +98,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     linked_names = set().union(*(_linked_item_nodes(node.get("parameters", {})) for node in nodes.values()), set())
     linked_items = bool(linked_names)
     parents = {name: sorted((edge for edge in main_edges if edge.target == name), key=lambda edge: edge.input) for name in main_nodes}
+    # Именованные ссылки разрешены только на узлы, достижимые по main-связям.
     ancestors = {}
     for name in order:
         ancestors[name] = set().union(*({edge.source} | ancestors[edge.source] for edge in parents[name])) if parents[name] else set()
@@ -108,6 +114,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     uses_deepseek = False
     uses_gmail = False
     http_credentials: set[str] = set()
+    http_credential_descriptions: dict[str, set[str]] = {}
     postgres_credential = None
     for index, name in enumerate(order):
         node = nodes[name]
@@ -145,7 +152,20 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         elif kind == "n8n-nodes-base.httpRequest":
             folder = "http_requests"
             source = generate_http_node(node, function)
-            http_credentials.update(http_credential_fields(node).values())
+            credential_fields = http_credential_fields(node)
+            http_credentials.update(credential_fields.values())
+            credential_type = node.get("parameters", {}).get("genericAuthType", "HTTP")
+            credentials = node.get("credentials", {})
+            credential = credentials.get(credential_type, {}) if isinstance(credentials, dict) else {}
+            credential_label = credential.get("name", credential_type) if isinstance(credential, dict) else credential_type
+            field_labels = {
+                "USERNAME": "имя пользователя", "PASSWORD": "пароль", "TOKEN": "Bearer token",
+                "HEADER_NAME": "имя заголовка", "HEADER_VALUE": "значение заголовка",
+                "NAME": "имя query-параметра", "VALUE": "значение query-параметра",
+            }
+            for field, key in credential_fields.items():
+                description = f"HTTP-узел «{name}», credential «{credential_label}»: {field_labels[field]}"
+                http_credential_descriptions.setdefault(key, set()).add(description)
             params = node["parameters"]
             values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody")), ("body", params.get("body"))]
             for key in ("headerParameters", "queryParameters", "bodyParameters"):
@@ -279,6 +299,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     terminal = [name for name in order if outgoing[name] == 0 and nodes[name]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.manualTrigger"}]
     return_code = ' + '.join(f'{aliases[name]}[0]' for name in terminal) or '[]' if branching else 'items'
     lineage_helpers = ('LINKED_ITEM_NODES = ' + repr(tuple(sorted(linked_names))) + '\n\n\n' + '''def _link_lineage(source_items, output_items, node_name):
+    """Перенести paired-item lineage через узел с выходными индексами."""
     for output_index, output_item in enumerate(output_items):
         paired = output_item.get("pairedItem")
         if isinstance(paired, dict):
@@ -302,6 +323,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
 
 
 def _link_outputs(source_items, outputs, node_name):
+    """Сохранить связь исходных items с выходами IF или Switch."""
     by_identity = {id(item): index for index, item in enumerate(source_items)}
     linked_outputs = [[] for _ in outputs]
     flattened = []
@@ -320,6 +342,7 @@ def _link_outputs(source_items, outputs, node_name):
 
 
 def _tag_merge_inputs(inputs):
+    """Пометить входные items индексами для восстановления lineage после Merge."""
     for input_index, items in enumerate(inputs):
         for item_index, item in enumerate(items):
             item["__transcriper_input"] = input_index
@@ -328,6 +351,7 @@ def _tag_merge_inputs(inputs):
 
 
 def _link_merge(inputs, output_items, node_name):
+    """Восстановить происхождение выходов Merge и проверить неоднозначность."""
     for output_index, item in enumerate(output_items):
         sources = item.pop("__transcriper_sources", None)
         if sources is None and "__transcriper_input" in item:
@@ -359,6 +383,7 @@ def _link_merge(inputs, output_items, node_name):
 
 
 def _clean_items(items):
+    """Удалить служебные поля lineage из результата публичной функции run()."""
     for item in items:
         item.pop("_n8n_lineage", None)
         item.pop("__transcriper_input", None)
@@ -366,18 +391,28 @@ def _clean_items(items):
         item.pop("__transcriper_sources", None)
     return items
 ''') if linked_items else ""
-    files["main.py"] = ('import logging\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
-        '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
+    files["main.py"] = ('"""Точка ручного запуска сгенерированного workflow."""\n\nimport logging\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
+        '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    """Выполнить workflow; input_data — список n8n items."""\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')
     config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
     if uses_deepseek:
-        config += '\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n'
+        config += '\n# API-ключ подключённой модели DeepSeek Chat.\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n'
     if uses_gmail:
-        config += '\nGMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\nGMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")\nGMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")\n'
+        config += ('\n# OAuth2 credentials Gmail; значения берутся из окружения.\n'
+                   'GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\n'
+                   'GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")\n'
+                   'GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")\n')
     for key in sorted(http_credentials):
-        config += f'\n{key} = os.getenv({key!r}, "")\n'
+        for description in sorted(http_credential_descriptions.get(key, set())):
+            config += f'\n# {description}.\n'
+        config += f'{key} = os.getenv({key!r}, "")\n'
     if postgres_credential is not None:
-        config += '\nPOSTGRES_HOST = os.getenv("POSTGRES_HOST", "")\nPOSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))\nPOSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "")\nPOSTGRES_USER = os.getenv("POSTGRES_USER", "")\nPOSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")\n'
+        config += ('\n# Подключение к PostgreSQL; пароль не хранится в исходном workflow.\n'
+                   'POSTGRES_HOST = os.getenv("POSTGRES_HOST", "")\n'
+                   'POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))\n'
+                   'POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "")\n'
+                   'POSTGRES_USER = os.getenv("POSTGRES_USER", "")\n'
+                   'POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")\n')
     files["config.py"] = config
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
     required = []
@@ -389,10 +424,20 @@ def _clean_items(items):
     if postgres_credential is not None:
         required.extend(["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"])
     credentials = ', '.join(f'`{key}`' for key in required) if required else 'не требуются'
-    files["README.md"] = ('# Сгенерированный проект\n\n'
-        'Установите зависимости: `python -m pip install -r requirements.txt`.\n\n'
-        f'Переменные окружения для авторизации: {credentials}.\n\n'
-        'Запуск: `python main.py`. Данные подключения читаются из `config.py`.\n')
+    files["README.md"] = (
+        '# Сгенерированный проект\n\n'
+        'Проект запускает преобразованный workflow как обычную Python-программу. Исходный JSON для запуска не нужен.\n\n'
+        '## Требования и установка\n\n'
+        'Нужен Python 3.11 или новее. В каталоге проекта выполните:\n\n'
+        '```bash\nuv venv\nuv pip install -r requirements.txt\n```\n\n'
+        '## Настройка credentials\n\n'
+        f'Задайте переменные окружения: {credentials}. Секреты не записывайте в исходники. '
+        'В `config.py` перечислены имена используемых переменных.\n\n'
+        'PowerShell: `$env:ИМЯ_ПЕРЕМЕННОЙ = "значение"`. Linux/macOS: `export ИМЯ_ПЕРЕМЕННОЙ="значение"`.\n\n'
+        '## Запуск\n\n'
+        'Windows PowerShell: `.venv\\Scripts\\python.exe main.py`. Linux/macOS: `.venv/bin/python main.py`.\n\n'
+        '`main.py` можно импортировать из другого кода: `from main import run`; функция `run(input_data)` принимает список items вида `[{"json": {...}}]`.\n'
+    )
     files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'
     files["conversion_report.md"] = (f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. '
         f'Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n\n'

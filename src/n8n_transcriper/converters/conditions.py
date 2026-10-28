@@ -7,6 +7,7 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def _filter(condition: Any, node: str) -> tuple[str, set[str]]:
+    """Скомпилировать фильтр n8n и собрать ссылки на предыдущие узлы."""
     if not isinstance(condition, dict) or set(condition) - {"options", "conditions", "combinator"}:
         raise WorkflowError(f"Узел {node}: некорректный фильтр")
     options = condition.get("options", {})
@@ -90,6 +91,7 @@ def generate_condition_node(node: dict[str, Any], function_name: str) -> tuple[s
     else:
         raise WorkflowError(f"Узел {name}: неподдерживаемый тип маршрутизации")
     helper = '''def compare(left, right, kind, operation, case_sensitive):
+    """Сравнить значения по оператору и типу фильтра n8n."""
     expected = {"string": str, "number": (int, float), "boolean": bool}[kind]
     if not isinstance(left, expected) or (kind == "number" and isinstance(left, bool)):
         raise TypeError("Неверный тип левого значения условия")
@@ -114,5 +116,5 @@ def generate_condition_node(node: dict[str, Any], function_name: str) -> tuple[s
     if operation == "lte": return left <= right
     raise ValueError("Неизвестный оператор")
 '''
-    source = 'import json\n\n\n' + helper + f'\n\ndef {function_name}(items, results, execution):\n    outputs = [[] for _ in range({count})]\n    for item in items:\n' + body + '    return outputs\n'
+    source = 'import json\n\n\n' + helper + f'\n\ndef {function_name}(items, results, execution):\n    """Разложить входные items по выходам IF или Switch."""\n    outputs = [[] for _ in range({count})]\n    for item in items:\n' + body + '    return outputs\n'
     return source, dependencies, count
