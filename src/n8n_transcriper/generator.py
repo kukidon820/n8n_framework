@@ -98,9 +98,14 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     for index, name in enumerate(order):
         node = nodes[name]
         kind = node["type"]
-        for setting in ("disabled", "alwaysOutputData", "executeOnce", "continueOnFail"):
+        for setting in ("disabled", "continueOnFail"):
             if node.get(setting, False) is not False:
                 raise WorkflowError(f"Узел {name}: настройка {setting} пока не поддерживается")
+        for setting in ("alwaysOutputData", "executeOnce"):
+            if not isinstance(node.get(setting, False), bool):
+                raise WorkflowError(f"Узел {name}: настройка {setting} должна быть логической")
+            if node.get(setting, False) and kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge"}:
+                raise WorkflowError(f"Узел {name}: настройка {setting} для маршрутизации пока не поддерживается")
         if node.get("onError", "stopWorkflow") != "stopWorkflow":
             raise WorkflowError(f"Узел {name}: настройка onError пока не поддерживается")
         if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
@@ -211,13 +216,24 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             ready = "all(merge_inputs)" if kind == "n8n-nodes-base.merge" else "items"
             calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", f"    if {ready}:",
                           f"        logging.info({(name + ': started')!r})"])
+            if node.get("executeOnce", False):
+                calls.append("        items = items[:1]")
             if is_condition:
                 calls.append(f"        {aliases[name]} = {stem}({arguments})")
             else:
-                calls.extend([f"        items = {stem}({arguments})", f"        {aliases[name]}[0] = items", f"        results[{name!r}] = items"])
+                calls.append(f"        items = {stem}({arguments})")
+                if node.get("alwaysOutputData", False):
+                    calls.extend(['        if not items:', '            items = [{"json": {}}]'])
+                calls.extend([f"        {aliases[name]}[0] = items", f"        results[{name!r}] = items"])
             calls.append(f"        logging.info({(name + ': completed')!r})")
         else:
-            calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': started')!r})", f"    items = {stem}({arguments})", f"    results[{name!r}] = items", f"    logging.info({(name + ': completed')!r})"])
+            calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': started')!r})"])
+            if node.get("executeOnce", False):
+                calls.append("    items = items[:1]")
+            calls.append(f"    items = {stem}({arguments})")
+            if node.get("alwaysOutputData", False):
+                calls.extend(['    if not items:', '        items = [{"json": {}}]'])
+            calls.extend([f"    results[{name!r}] = items", f"    logging.info({(name + ': completed')!r})"])
         converted += 1
         if kind not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
             completed.add(name)
