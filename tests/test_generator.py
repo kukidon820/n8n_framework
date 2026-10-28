@@ -76,19 +76,108 @@ def test_generated_set_reads_the_linked_item(tmp_path):
     assert result.stdout.strip() == "[{'json': {'copied': 2}}, {'json': {'copied': 1}}]"
 
 
-def test_linked_item_expression_rejects_ambiguous_branching(tmp_path):
+def test_linked_item_expression_follows_if_output(tmp_path):
     build = {"id": "1", "name": "Build", "type": "n8n-nodes-base.code", "parameters": {
         "language": "pythonNative", "pythonCode": "return _items"}}
+    condition = {"options": {"caseSensitive": True, "typeValidation": "strict"}, "combinator": "and",
+                 "conditions": [{"leftValue": "={{ $json.status }}", "rightValue": "yes",
+                                 "operator": {"type": "string", "operation": "equals"}}]}
+    branch = {"id": "if", "name": "IF", "type": "n8n-nodes-base.if", "typeVersion": 2.2,
+              "parameters": {"conditions": condition, "options": {}}}
+    merge = {"id": "merge", "name": "Join", "type": "n8n-nodes-base.merge", "typeVersion": 3,
+             "parameters": {"mode": "append", "numberInputs": 2}}
     copy = {"id": "2", "name": "Copy", "type": "n8n-nodes-base.set", "typeVersion": 3.5,
             "parameters": {"assignments": {"assignments": [
                 {"name": "copied", "type": "number", "value": "={{ $('Build').item.json.value }}"}]}}}
-    other = {"id": "3", "name": "Other", "type": "n8n-nodes-base.code", "parameters": {
+    workflow = {"nodes": [build, branch, merge, copy], "connections": {
+        "Build": {"main": [[{"node": "IF", "type": "main", "index": 0}]]},
+        "IF": {"main": [[{"node": "Join", "type": "main", "index": 0}],
+                         [{"node": "Join", "type": "main", "index": 1}]]},
+        "Join": {"main": [[{"node": "Copy", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "out"
+    generate_project(workflow, output)
+    script = "import main; assert main.run([{'json': {'status': 'yes', 'value': 7}}, {'json': {'status': 'no', 'value': 9}}]) == [{'json': {'copied': 7}}, {'json': {'copied': 9}}]"
+    result = subprocess.run([sys.executable, "-c", script], cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_linked_items_survive_combine_after_if_when_unpaired(tmp_path):
+    build = {"id": "1", "name": "Build", "type": "n8n-nodes-base.code", "parameters": {
         "language": "pythonNative", "pythonCode": "return _items"}}
-    workflow = {"nodes": [build, copy, other], "connections": {
-        "Build": {"main": [[{"node": "Copy", "type": "main", "index": 0},
-                              {"node": "Other", "type": "main", "index": 0}]]}}}
-    with pytest.raises(WorkflowError, match="только в линейных workflow"):
-        generate_project(workflow, tmp_path / "out")
+    condition = {"options": {"caseSensitive": True, "typeValidation": "strict"}, "combinator": "and",
+                 "conditions": [{"leftValue": "={{ $json.status }}", "rightValue": "yes",
+                                 "operator": {"type": "string", "operation": "equals"}}]}
+    branch = {"id": "if", "name": "IF", "type": "n8n-nodes-base.if", "typeVersion": 2.2,
+              "parameters": {"conditions": condition, "options": {}}}
+    merge = {"id": "merge", "name": "Join", "type": "n8n-nodes-base.merge", "typeVersion": 3,
+             "parameters": {"mode": "combine", "combineBy": "combineByFields",
+                            "fieldsToMatchString": "key", "joinMode": "keepEverything"}}
+    copy = {"id": "2", "name": "Copy", "type": "n8n-nodes-base.set", "typeVersion": 3.5,
+            "parameters": {"assignments": {"assignments": [
+                {"name": "copied", "type": "number", "value": "={{ $('Build').item.json.value }}"}]}}}
+    workflow = {"nodes": [build, branch, merge, copy], "connections": {
+        "Build": {"main": [[{"node": "IF", "type": "main", "index": 0}]]},
+        "IF": {"main": [[{"node": "Join", "type": "main", "index": 0}],
+                         [{"node": "Join", "type": "main", "index": 1}]]},
+        "Join": {"main": [[{"node": "Copy", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "out"
+    generate_project(workflow, output)
+    script = "import main; assert main.run([{'json': {'status': 'yes', 'key': 1, 'value': 7}}, {'json': {'status': 'no', 'key': 2, 'value': 9}}]) == [{'json': {'copied': 7}}, {'json': {'copied': 9}}]"
+    result = subprocess.run([sys.executable, "-c", script], cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_linked_item_fails_when_combine_pairs_different_source_items(tmp_path):
+    build = {"id": "1", "name": "Build", "type": "n8n-nodes-base.code", "parameters": {
+        "language": "pythonNative", "pythonCode": "return _items"}}
+    condition = {"options": {"caseSensitive": True, "typeValidation": "strict"}, "combinator": "and",
+                 "conditions": [{"leftValue": "={{ $json.status }}", "rightValue": "yes",
+                                 "operator": {"type": "string", "operation": "equals"}}]}
+    branch = {"id": "if", "name": "IF", "type": "n8n-nodes-base.if", "typeVersion": 2.2,
+              "parameters": {"conditions": condition, "options": {}}}
+    merge = {"id": "merge", "name": "Join", "type": "n8n-nodes-base.merge", "typeVersion": 3,
+             "parameters": {"mode": "combine", "combineBy": "combineByFields",
+                            "fieldsToMatchString": "key", "joinMode": "keepEverything"}}
+    copy = {"id": "2", "name": "Copy", "type": "n8n-nodes-base.set", "typeVersion": 3.5,
+            "parameters": {"assignments": {"assignments": [
+                {"name": "copied", "type": "number", "value": "={{ $('Build').item.json.value }}"}]}}}
+    workflow = {"nodes": [build, branch, merge, copy], "connections": {
+        "Build": {"main": [[{"node": "IF", "type": "main", "index": 0}]]},
+        "IF": {"main": [[{"node": "Join", "type": "main", "index": 0}],
+                         [{"node": "Join", "type": "main", "index": 1}]]},
+        "Join": {"main": [[{"node": "Copy", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "out"
+    generate_project(workflow, output)
+    script = "import main; main.run([{'json': {'status': 'yes', 'key': 1, 'value': 7}}, {'json': {'status': 'no', 'key': 1, 'value': 9}}])"
+    result = subprocess.run([sys.executable, "-c", script], cwd=output, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "Ссылка .item на узел Build неоднозначна" in result.stderr
+
+
+def test_linked_item_tracks_switch_all_matching_outputs(tmp_path):
+    switch = {"id": "switch", "name": "Switch", "type": "n8n-nodes-base.switch", "typeVersion": 3.2,
+              "parameters": {"mode": "rules", "rules": {"values": [
+                  {"conditions": {"options": {"caseSensitive": True, "typeValidation": "strict"},
+                                  "combinator": "and", "conditions": [{"leftValue": "={{ $json.status }}",
+                                  "rightValue": "yes", "operator": {"type": "string", "operation": "equals"}}]}},
+                  {"conditions": {"options": {"caseSensitive": True, "typeValidation": "strict"},
+                                  "combinator": "and", "conditions": [{"leftValue": "={{ $json.status }}",
+                                  "rightValue": "yes", "operator": {"type": "string", "operation": "equals"}}]}},
+              ]}, "options": {"allMatchingOutputs": True}}}
+    merge = {"id": "merge", "name": "Join", "type": "n8n-nodes-base.merge", "typeVersion": 3,
+             "parameters": {"mode": "append", "numberInputs": 2}}
+    copy = {"id": "copy", "name": "Copy", "type": "n8n-nodes-base.set", "typeVersion": 3.5,
+            "parameters": {"assignments": {"assignments": [
+                {"name": "copied", "type": "string", "value": "={{ $('Switch').item.json.status }}"}]}}}
+    workflow = {"nodes": [switch, merge, copy], "connections": {
+        "Switch": {"main": [[{"node": "Join", "type": "main", "index": 0}],
+                             [{"node": "Join", "type": "main", "index": 1}]]},
+        "Join": {"main": [[{"node": "Copy", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "out"
+    generate_project(workflow, output)
+    script = "import main; assert main.run([{'json': {'status': 'yes'}}]) == [{'json': {'copied': 'yes'}}, {'json': {'copied': 'yes'}}]"
+    result = subprocess.run([sys.executable, "-c", script], cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_empty_output_stops_linear_chain(tmp_path):

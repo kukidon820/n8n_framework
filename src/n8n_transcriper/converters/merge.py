@@ -22,8 +22,11 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
             raise WorkflowError(f"Узел {name}: неподдерживаемые настройки Merge Append")
         return f'''def {function_name}(inputs):
     result = []
-    for items in inputs:
-        result.extend(items)
+    for input_index, items in enumerate(inputs):
+        for item_index, item in enumerate(items):
+            if "__transcriper_input" in item:
+                item["__transcriper_sources"] = [(input_index, item_index)]
+            result.append(item)
     return result
 ''', count
     allowed = {"mode", "numberInputs", "combineBy", "options", "fieldsToMatchString", "advanced", "mergeByFields", "joinMode", "outputDataFrom"}
@@ -235,7 +238,12 @@ def combine(entries):
         else:
             data = merge_values(data, incoming, True, {override_empty!r})
         binary = merge_values(binary, entry.get("binary", {{}}))
-    return {{"json": data, "binary": binary}}
+    result = {{"json": data, "binary": binary}}
+    sources = [(entry["__transcriper_input"], entry["__transcriper_index"])
+               for entry in entries if "__transcriper_input" in entry]
+    if sources:
+        result["__transcriper_sources"] = sources
+    return result
 
 
 def {function_name}(inputs):
