@@ -55,6 +55,12 @@ def _split_top_level(value: str, delimiter: str) -> list[str]:
 
 def _expression(value: str) -> Expression:
     value = value.strip()
+    comparison = re.fullmatch(r"(.+?)\s*(===|!==)\s*(true|false|null)", value, re.DOTALL)
+    if comparison:
+        left = _expression(comparison.group(1))
+        literal = {"true": "True", "false": "False", "null": "None"}[comparison.group(3)]
+        operator = "is" if comparison.group(2) == "===" else "is not"
+        return Expression(f"({left.code} {operator} {literal})", left.dependencies)
     parts = _split_top_level(value, "+")
     if len(parts) > 1:
         compiled = [_expression(part) for part in parts]
