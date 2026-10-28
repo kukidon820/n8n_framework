@@ -281,3 +281,19 @@ def test_pagination_follows_next_url(monkeypatch):
     result = namespace["request"]([{"json": {}}], {}, {})
     assert seen == ["https://example.com/page1", "https://example.com/page2"]
     assert [item["json"]["items"] for item in result] == [[1], [2]]
+
+
+def test_full_response_and_never_error(monkeypatch):
+    import httpx
+    real_client = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(400, headers={"X-Test": "present"}, json=[{"id": 1}]))
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    node = {"name": "HTTP", "parameters": {"url": "https://example.com", "options": {"response": {"response": {
+        "responseFormat": "json", "fullResponse": True, "neverError": True}}}}}
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    result = namespace["request"]([{"json": {}}], {}, {})
+    assert len(result) == 1
+    assert result[0]["json"]["statusCode"] == 400
+    assert result[0]["json"]["headers"]["x-test"] == "present"
+    assert result[0]["json"]["body"] == [{"id": 1}]
