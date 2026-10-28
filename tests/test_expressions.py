@@ -13,6 +13,12 @@ def test_named_node_and_nested_paths():
     assert result.dependencies == {"Settings"}
 
 
+def test_named_node_linked_item_selector():
+    result = compile_expression("={{ $('Build').item.json.rows[0].id }}", node="Edit", parameter="value")
+    assert result.code == "results['Build'][item['_n8n_lineage']['Build']]['json']['rows'][0]['id']"
+    assert result.dependencies == {"Build"}
+
+
 def test_template_and_array():
     result = compile_expression("ID: {{ $json.data[0].id }}", node="test", parameter="text")
     assert result.code == "'ID: ' + str(item['json']['data'][0]['id']) + ''"
@@ -59,6 +65,23 @@ def test_strict_comparisons_preserve_javascript_types():
     assert namespace["inverse"]({"json": {"first": "a === b"}}) is False
     with pytest.raises(WorkflowError, match="цепочка сравнений"):
         compile_expression("={{ $json.a === $json.b !== true }}", node="IF", parameter="condition")
+
+
+@pytest.mark.parametrize(
+    "expression,first,second,expected",
+    [
+        ("$json.first == $json.second", 1, "1", True),
+        ("$json.first == $json.second", False, "", True),
+        ("$json.first == $json.second", 1, "text", False),
+        ("$json.first != $json.second", 2, "3", True),
+        ("$json.first == 'value {left}'", "value {left}", "ignored", True),
+    ],
+)
+def test_loose_comparisons(expression, first, second, expected):
+    result = compile_expression(f"={{{{ {expression} }}}}", node="IF", parameter="condition")
+    namespace = {}
+    exec("def check(item):\n    return " + result.code, namespace)
+    assert namespace["check"]({"json": {"first": first, "second": second}}) is expected
 
 
 def test_logical_operators_use_javascript_truth_and_short_circuit():

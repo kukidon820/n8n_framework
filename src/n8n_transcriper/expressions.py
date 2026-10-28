@@ -89,12 +89,15 @@ def _expression(value: str) -> Expression:
         else:
             return _expression(value[1:-1])
     comparisons = []
-    for operator in ("===", "!=="):
+    for operator in ("===", "!==", "==", "!="):
         # Подстановка разделителя выполняется только вне строк и вложенных скобок.
         quote = None
         escaped = False
         depth = 0
+        covered = set()
         for index, char in enumerate(value):
+            if index in covered:
+                continue
             if quote:
                 if escaped:
                     escaped = False
@@ -108,18 +111,34 @@ def _expression(value: str) -> Expression:
                 depth += 1
             elif char in ")]}":
                 depth -= 1
-            elif depth == 0 and value.startswith(operator, index):
-                comparisons.append((index, operator))
+            elif depth == 0:
+                found = next((candidate for candidate in ("===", "!==", "==", "!=")
+                              if value.startswith(candidate, index)), None)
+                if found:
+                    if found == operator:
+                        comparisons.append((index, operator))
+                    covered.update(range(index + 1, index + len(found)))
     if len(comparisons) > 1:
         raise ValueError("цепочка сравнений не поддерживается")
     if comparisons:
         index, operator = comparisons[0]
         left = _expression(value[:index])
         right = _expression(value[index + len(operator):])
-        equality = ('(type(a) in (int, float) and type(b) in (int, float) and a == b) or '
-                    '(type(a) is type(b) and (a is b if isinstance(a, (dict, list)) else a == b))')
-        comparison = f"not ({equality})" if operator == "!==" else f"({equality})"
-        code = f"(lambda a, b: {comparison})({left.code}, {right.code})"
+        if operator in {"===", "!=="}:
+            equality = ('(type(a) in (int, float) and type(b) in (int, float) and a == b) or '
+                        '(type(a) is type(b) and (a is b if isinstance(a, (dict, list)) else a == b))')
+        else:
+            equality = ('(a is None and b is None) or (isinstance(a, str) and isinstance(b, str) and a == b) or '
+                        '((lambda x, y: x is not None and y is not None and x == y)(number(a), number(b)))')
+        negate = operator in {"!==", "!="}
+        comparison = f"not ({equality})" if negate else f"({equality})"
+        helper = ("lambda v: float(v) if type(v) in (int, float) else float(v) if isinstance(v, bool) else "
+                  "(float(v.strip() or '0') if isinstance(v, str) and "
+                  "(not v.strip() or __import__('re').fullmatch(r'[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?', v.strip())) else None)")
+        if operator in {"==", "!="}:
+            code = f"(lambda a, b, number: {comparison})({left.code}, {right.code}, ({helper}))"
+        else:
+            code = f"(lambda a, b: {comparison})({left.code}, {right.code})"
         return Expression(code, left.dependencies | right.dependencies)
     parts = _split_top_level(value, "+")
     if len(parts) > 1:
@@ -182,7 +201,10 @@ def _selector(value: str) -> Expression:
     else:
         base = f"item[{root!r}]"
     if node is not None or root == "input":
-        if rest.startswith(".first()"):
+        if node is not None and rest.startswith(".item") and (len(rest) == 5 or rest[5] in ".["):
+            base = f"results[{node!r}][item['_n8n_lineage'][{node!r}]]"
+            rest = rest[len(".item"):]
+        elif rest.startswith(".first()"):
             base += "[0]"
             rest = rest[len(".first()"):]
         elif rest.startswith(".all()"):

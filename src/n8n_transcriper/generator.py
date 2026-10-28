@@ -20,6 +20,18 @@ from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
 
+def _has_linked_item_expression(value: Any) -> bool:
+    if isinstance(value, str):
+        if not value.startswith("=") and "{{" not in value:
+            return False
+        return re.search(r"""\$\(\s*['"][^'"]+['"]\s*\)\.item(?:\.|\[|$)""", value) is not None
+    if isinstance(value, dict):
+        return any(_has_linked_item_expression(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_linked_item_expression(item) for item in value)
+    return False
+
+
 def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
     """Создать читаемые и устойчивые имена модулей из имён и ID узлов."""
     reserved = {"logging", "uuid", "deepcopy", "run", "postgres", "config", "main", "__init__", "items", "results", "execution", "input_data"}
@@ -78,6 +90,9 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             raise WorkflowError(f"Узел {source}: неподдерживаемые выходы")
     order = [name for name in execution_order(workflow) if name not in model_names]
     branching = any(nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge"} or outgoing[name] > 1 for name in main_nodes)
+    linked_items = any(_has_linked_item_expression(node.get("parameters", {})) for node in nodes.values())
+    if linked_items and branching:
+        raise WorkflowError("Выражения .item пока поддерживаются только в линейных workflow с однозначной связью items")
     parents = {name: sorted((edge for edge in main_edges if edge.target == name), key=lambda edge: edge.input) for name in main_nodes}
     ancestors = {}
     for name in order:
@@ -234,9 +249,13 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': started')!r})"])
             if node.get("executeOnce", False):
                 calls.append("    items = items[:1]")
+            if linked_items:
+                calls.append("    source_items = items")
             calls.append(f"    items = {stem}({arguments})")
             if node.get("alwaysOutputData", False):
                 calls.extend(['    if not items:', '        items = [{"json": {}}]'])
+            if linked_items:
+                calls.append(f"    items = _link_lineage(source_items, items, {name!r})")
             calls.extend([f"    results[{name!r}] = items", f"    logging.info({(name + ': completed')!r})"])
         converted += 1
         if kind not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
@@ -245,9 +264,37 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         raise WorkflowError("Workflow не содержит исполняемых поддерживаемых узлов")
     terminal = [name for name in order if outgoing[name] == 0 and nodes[name]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.manualTrigger"}]
     return_code = ' + '.join(f'{aliases[name]}[0]' for name in terminal) or '[]' if branching else 'items'
+    lineage_helpers = '''def _link_lineage(source_items, output_items, node_name):
+    for output_index, output_item in enumerate(output_items):
+        paired = output_item.get("pairedItem")
+        if isinstance(paired, dict):
+            source_index = paired.get("item")
+        elif isinstance(paired, list) and len(paired) == 1 and isinstance(paired[0], dict):
+            source_index = paired[0].get("item")
+        elif isinstance(paired, int) and not isinstance(paired, bool):
+            source_index = paired
+        elif paired is None and len(source_items) == 1:
+            source_index = 0
+        elif paired is None and len(source_items) == len(output_items):
+            source_index = output_index
+        else:
+            continue
+        if not isinstance(source_index, int) or isinstance(source_index, bool) or not 0 <= source_index < len(source_items):
+            continue
+        lineage = dict(source_items[source_index].get("_n8n_lineage", {}))
+        lineage[node_name] = output_index
+        output_item["_n8n_lineage"] = lineage
+    return output_items
+
+
+def _clean_items(items):
+    for item in items:
+        item.pop("_n8n_lineage", None)
+    return items
+''' if linked_items else ""
     files["main.py"] = ('import logging\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
-        '\n\n\ndef run(input_data=None):\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
-        '\n'.join(calls) + f'\n    return {return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')
+        '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
+        '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')
     config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
     if uses_deepseek:
         config += '\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n'
