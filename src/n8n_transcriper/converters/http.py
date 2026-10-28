@@ -74,7 +74,8 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         output = 'result.append({"json": {"data": response.text}})'
     else:
         output = 'result.append({"json": {}, "binary": {"data": {"data": response.content, "mimeType": response.headers.get("content-type", "application/octet-stream")}}})'
-    return f'''import time
+    return f'''import json
+import time
 
 import httpx
 

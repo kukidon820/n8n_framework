@@ -49,7 +49,7 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
         lines.extend([f"        value = {expression.code}",
                       f"        if not isinstance(value, str):\n            raise TypeError({('Узел ' + name + ', поле ' + field + ': ожидалась строка')!r})",
                       f"        data[{field!r}] = value"])
-    source = ('from copy import deepcopy\n\n\n' + f'def {function_name}(items, results, execution):\n' +
+    source = ('import json\nfrom copy import deepcopy\n\n\n' + f'def {function_name}(items, results, execution):\n' +
               '    result = []\n    for item in items:\n' +
               f'        data = deepcopy(item.get("json", {{}})) if {include!r} else {{}}\n' +
               ('\n'.join(lines) + '\n' if lines else '') +
