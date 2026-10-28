@@ -31,7 +31,7 @@ def test_generate_and_run_linear_project(tmp_path):
 def test_unsupported_example_fails_without_partial_output(tmp_path):
     path = next(Path(__file__).resolve().parent.parent.glob("HTTP * Email (2).json"))
     output = tmp_path / "generated"
-    with pytest.raises(WorkflowError, match="соединения"):
+    with pytest.raises(WorkflowError, match="HTTP-параметры"):
         generate_project(read_workflow(path), output)
     assert not output.exists()
 
