@@ -72,6 +72,13 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     for index, name in enumerate(order):
         node = nodes[name]
         kind = node["type"]
+        for setting in ("disabled", "alwaysOutputData", "executeOnce", "continueOnFail"):
+            if node.get(setting, False) is not False:
+                raise WorkflowError(f"Узел {name}: настройка {setting} пока не поддерживается")
+        if node.get("onError", "stopWorkflow") != "stopWorkflow":
+            raise WorkflowError(f"Узел {name}: настройка onError пока не поддерживается")
+        if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
+            raise WorkflowError(f"Узел {name}: настройка retryOnFail пока не поддерживается")
         if kind == "n8n-nodes-base.manualTrigger":
             if index != 0:
                 raise WorkflowError(f"Узел {name}: триггер должен быть первым")
@@ -169,7 +176,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
                 calls.extend([f"        items = {stem}({arguments})", f"        {aliases[name]}[0] = items", f"        results[{name!r}] = items"])
             calls.append(f"        logging.info({(name + ': completed')!r})")
         else:
-            calls.extend([f"    logging.info({(name + ': started')!r})", f"    items = {stem}({arguments})", f"    results[{name!r}] = items", f"    logging.info({(name + ': completed')!r})"])
+            calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': started')!r})", f"    items = {stem}({arguments})", f"    results[{name!r}] = items", f"    logging.info({(name + ': completed')!r})"])
         converted += 1
         if kind not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
             completed.add(name)

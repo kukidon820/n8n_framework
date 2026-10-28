@@ -51,3 +51,23 @@ def test_generated_set_reads_previous_node(tmp_path):
                             cwd=output, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "test@example.com"
+
+
+def test_empty_output_stops_linear_chain(tmp_path):
+    workflow = {"nodes": [
+        {"id": "1", "name": "Empty", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "return []"}},
+        {"id": "2", "name": "Must not run", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "raise RuntimeError('must not execute')"}},
+    ], "connections": {"Empty": {"main": [[{"node": "Must not run", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "generated"
+    generate_project(workflow, output)
+    result = subprocess.run([sys.executable, "-c", "import main; assert main.run() == []"], cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("setting,value", [("disabled", True), ("alwaysOutputData", True), ("executeOnce", True), ("onError", "continueRegularOutput"), ("retryOnFail", True)])
+def test_unimplemented_execution_settings_fail_before_writing(tmp_path, setting, value):
+    node = {"id": "1", "name": "Code", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "return _items"}, setting: value}
+    output = tmp_path / "out"
+    with pytest.raises(WorkflowError, match=setting):
+        generate_project({"nodes": [node], "connections": {}}, output)
+    assert not output.exists()
