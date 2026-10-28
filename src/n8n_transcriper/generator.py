@@ -20,16 +20,16 @@ from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
 
-def _has_linked_item_expression(value: Any) -> bool:
+def _linked_item_nodes(value: Any) -> set[str]:
     if isinstance(value, str):
         if not value.startswith("=") and "{{" not in value:
-            return False
-        return re.search(r"""\$\(\s*['"][^'"]+['"]\s*\)\.item(?:\.|\[|$)""", value) is not None
+            return set()
+        return {match.group(2) for match in re.finditer(r"""\$\(\s*(['"])(.*?)\1\s*\)\.item(?:\.|\[|$)""", value)}
     if isinstance(value, dict):
-        return any(_has_linked_item_expression(item) for item in value.values())
+        return set().union(*(_linked_item_nodes(item) for item in value.values()), set())
     if isinstance(value, list):
-        return any(_has_linked_item_expression(item) for item in value)
-    return False
+        return set().union(*(_linked_item_nodes(item) for item in value), set())
+    return set()
 
 
 def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
@@ -90,9 +90,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             raise WorkflowError(f"Узел {source}: неподдерживаемые выходы")
     order = [name for name in execution_order(workflow) if name not in model_names]
     branching = any(nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge"} or outgoing[name] > 1 for name in main_nodes)
-    linked_items = any(_has_linked_item_expression(node.get("parameters", {})) for node in nodes.values())
-    if linked_items and branching:
-        raise WorkflowError("Выражения .item пока поддерживаются только в линейных workflow с однозначной связью items")
+    linked_names = set().union(*(_linked_item_nodes(node.get("parameters", {})) for node in nodes.values()), set())
+    linked_items = bool(linked_names)
     parents = {name: sorted((edge for edge in main_edges if edge.target == name), key=lambda edge: edge.input) for name in main_nodes}
     ancestors = {}
     for name in order:
@@ -189,9 +188,6 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             source, input_count = generate_merge_node(node, function)
             if [edge.input for edge in parents[name]] != list(range(input_count)):
                 raise WorkflowError(f"Узел {name}: Merge требует по одному соединению на каждый вход")
-            conditional_merge = any(nodes[ancestor]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} for ancestor in ancestors[name])
-            if conditional_merge and node.get("parameters", {}).get("mode", "append") != "append":
-                raise WorkflowError(f"Узел {name}: после условных ветвей поддерживается только Merge Append")
             arguments = "merge_inputs"
         elif kind == "@n8n/n8n-nodes-langchain.agent":
             if name not in models:
@@ -222,7 +218,9 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             edge = parents[name][0] if parents[name] else None
             if kind == "n8n-nodes-base.merge":
                 values = [f'deepcopy({aliases[e.source]}[{e.output}])' for e in parents[name]]
-                calls.extend([f"    merge_inputs = [{', '.join(values)}]", "    items = merge_inputs[0]"])
+                inputs_code = f"[{', '.join(values)}]"
+                calls.append(f"    merge_inputs = _tag_merge_inputs({inputs_code})" if linked_items else f"    merge_inputs = {inputs_code}")
+                calls.append("    items = merge_inputs[0]")
             elif edge:
                 fanout = sum(1 for e in main_edges if e.source == edge.source and e.output == edge.output) > 1
                 value = f"{aliases[edge.source]}[{edge.output}]"
@@ -233,23 +231,35 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             include_unpaired = isinstance(merge_options, dict) and merge_options.get("includeUnpaired", False)
             merge_params = node.get("parameters", {})
             outer_join = merge_params.get("mode") == "combine" and merge_params.get("combineBy", "combineByFields") == "combineByFields" and merge_params.get("joinMode", "keepMatches") != "keepMatches"
-            conditional_merge = kind == "n8n-nodes-base.merge" and any(
-                nodes[ancestor]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}
-                for ancestor in ancestors[name]
-            )
-            ready = ("any(merge_inputs)" if include_unpaired or outer_join or conditional_merge else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
+            append_merge = kind == "n8n-nodes-base.merge" and merge_params.get("mode", "append") == "append"
+            ready = ("any(merge_inputs)" if include_unpaired or outer_join or append_merge else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
             calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", f"    if {ready}:",
                           f"        logging.info({(name + ': started')!r})"])
             if node.get("executeOnce", False):
                 calls.append("        items = items[:1]")
             if is_condition:
-                calls.append(f"        {aliases[name]} = {stem}({arguments})")
+                if linked_items:
+                    calls.extend([
+                        f"        branch_outputs = {stem}({arguments})",
+                        f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r})",
+                    ])
+                else:
+                    calls.append(f"        {aliases[name]} = {stem}({arguments})")
             else:
+                if linked_items and kind != "n8n-nodes-base.merge":
+                    calls.append("        source_items = items")
                 calls.append(f"        items = {stem}({arguments})")
                 if node.get("alwaysOutputData", False):
                     calls.extend(['        if not items:', '            items = [{"json": {}}]'])
+                if linked_items:
+                    if kind == "n8n-nodes-base.merge":
+                        calls.append(f"        items = _link_merge(merge_inputs, items, {name!r})")
+                    else:
+                        calls.append(f"        items = _link_lineage(source_items, items, {name!r})")
                 calls.extend([f"        {aliases[name]}[0] = items", f"        results[{name!r}] = items"])
             calls.append(f"        logging.info({(name + ': completed')!r})")
+            if is_condition:
+                calls.append(f"    results[{name!r}] = [item for output in {aliases[name]} for item in output]")
         else:
             calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': started')!r})"])
             if node.get("executeOnce", False):
@@ -263,13 +273,12 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
                 calls.append(f"    items = _link_lineage(source_items, items, {name!r})")
             calls.extend([f"    results[{name!r}] = items", f"    logging.info({(name + ': completed')!r})"])
         converted += 1
-        if kind not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
-            completed.add(name)
+        completed.add(name)
     if not converted:
         raise WorkflowError("Workflow не содержит исполняемых поддерживаемых узлов")
     terminal = [name for name in order if outgoing[name] == 0 and nodes[name]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.manualTrigger"}]
     return_code = ' + '.join(f'{aliases[name]}[0]' for name in terminal) or '[]' if branching else 'items'
-    lineage_helpers = '''def _link_lineage(source_items, output_items, node_name):
+    lineage_helpers = ('LINKED_ITEM_NODES = ' + repr(tuple(sorted(linked_names))) + '\n\n\n' + '''def _link_lineage(source_items, output_items, node_name):
     for output_index, output_item in enumerate(output_items):
         paired = output_item.get("pairedItem")
         if isinstance(paired, dict):
@@ -292,11 +301,71 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     return output_items
 
 
+def _link_outputs(source_items, outputs, node_name):
+    by_identity = {id(item): index for index, item in enumerate(source_items)}
+    linked_outputs = [[] for _ in outputs]
+    flattened = []
+    for port, items in enumerate(outputs):
+        for item in items:
+            source_index = by_identity.get(id(item))
+            if source_index is None:
+                continue
+            output_item = deepcopy(item)
+            lineage = dict(source_items[source_index].get("_n8n_lineage", {}))
+            lineage[node_name] = len(flattened)
+            output_item["_n8n_lineage"] = lineage
+            linked_outputs[port].append(output_item)
+            flattened.append(output_item)
+    return linked_outputs
+
+
+def _tag_merge_inputs(inputs):
+    for input_index, items in enumerate(inputs):
+        for item_index, item in enumerate(items):
+            item["__transcriper_input"] = input_index
+            item["__transcriper_index"] = item_index
+    return inputs
+
+
+def _link_merge(inputs, output_items, node_name):
+    for output_index, item in enumerate(output_items):
+        sources = item.pop("__transcriper_sources", None)
+        if sources is None and "__transcriper_input" in item:
+            sources = [(item["__transcriper_input"], item["__transcriper_index"])]
+        inherited = []
+        for input_index, item_index in sources or []:
+            item.pop("__transcriper_input", None)
+            item.pop("__transcriper_index", None)
+            if (isinstance(input_index, int) and 0 <= input_index < len(inputs)
+                    and isinstance(item_index, int) and 0 <= item_index < len(inputs[input_index])):
+                inherited.append(inputs[input_index][item_index].get("_n8n_lineage", {}))
+        lineage = {}
+        conflicts = set()
+        for source_lineage in inherited:
+            for ancestor, ancestor_index in source_lineage.items():
+                if ancestor in conflicts:
+                    continue
+                if ancestor in lineage and lineage[ancestor] != ancestor_index:
+                    lineage.pop(ancestor)
+                    conflicts.add(ancestor)
+                else:
+                    lineage[ancestor] = ancestor_index
+        ambiguous = sorted(conflicts.intersection(LINKED_ITEM_NODES))
+        if ambiguous:
+            raise ValueError(f"Ссылка .item на узел {ambiguous[0]} неоднозначна после Merge {node_name}")
+        lineage[node_name] = output_index
+        item["_n8n_lineage"] = lineage
+    return output_items
+
+
 def _clean_items(items):
     for item in items:
         item.pop("_n8n_lineage", None)
+        item.pop("__transcriper_input", None)
+        item.pop("__transcriper_index", None)
+        item.pop("__transcriper_sources", None)
     return items
-''' if linked_items else ""
+''') if linked_items else ""
     files["main.py"] = ('import logging\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
         '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')

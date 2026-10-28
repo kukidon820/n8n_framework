@@ -78,6 +78,23 @@ def test_merge_append_joins_selected_conditional_outputs(tmp_path):
     assert execute(output, [{"json": {"status": "yes"}}]) == [{"json": {"status": "yes"}}]
 
 
+def test_merge_append_keeps_items_from_nonempty_input(tmp_path):
+    start = code_node("Start", "start")
+    empty = code_node("Empty", "empty")
+    empty["parameters"]["pythonCode"] = "return []"
+    passed = code_node("Passed", "passed")
+    passed["parameters"]["pythonCode"] = "return _items"
+    merge = {"id": "merge", "name": "Join", "type": "n8n-nodes-base.merge", "typeVersion": 3,
+             "parameters": {"mode": "append", "numberInputs": 2}}
+    workflow = {"nodes": [start, empty, passed, merge], "connections": {
+        "Start": {"main": [[edge("Empty"), edge("Passed")]]},
+        "Empty": {"main": [[{"node": "Join", "type": "main", "index": 0}]]},
+        "Passed": {"main": [[{"node": "Join", "type": "main", "index": 1}]]}}}
+    output = tmp_path / "output"
+    generate_project(workflow, output)
+    assert execute(output, [{"json": {"id": 1}}]) == [{"json": {"branch": "start"}}]
+
+
 def test_unselected_branch_is_never_executed(tmp_path):
     node = {"id": "if", "name": "IF", "type": "n8n-nodes-base.if", "parameters": {"conditions": condition(True, "true", "boolean")}}
     fails = code_node("Bad", "bad")
