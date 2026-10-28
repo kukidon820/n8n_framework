@@ -89,3 +89,47 @@ def test_multiple_parameters_are_bound_separately(monkeypatch):
     exec(code, namespace)
     namespace["run"]([{"json": {"id": 7, "email": "a,b'"}}], {}, {})
     assert calls == [("SELECT id FROM users WHERE id = %(p1)s AND email = %(p2)s", {"p1": 7, "p2": "a,b'"})]
+
+
+def test_transaction_commits_all_or_rolls_back(monkeypatch):
+    committed = []
+    connections = []
+    class Cursor:
+        description = None
+        def __init__(self, connection): self.connection = connection
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def execute(self, query, params):
+            assert query == "INSERT INTO users (email) VALUES (%(p1)s)"
+            if params["p1"] == "bad":
+                raise RuntimeError("database failure")
+            self.connection.pending.append(params["p1"])
+    class Connection:
+        def __init__(self): self.pending = []
+        def __enter__(self): return self
+        def __exit__(self, exc_type, *_):
+            if exc_type is None: committed.extend(self.pending)
+        def cursor(self): return Cursor(self)
+    def connect(timeout):
+        connection = Connection()
+        connections.append(connection)
+        return connection
+    database = ModuleType("database")
+    database.__path__ = []
+    postgres = ModuleType("database.postgres")
+    postgres.connect = connect
+    monkeypatch.setitem(sys.modules, "database", database)
+    monkeypatch.setitem(sys.modules, "database.postgres", postgres)
+    node = postgres_node()
+    node["parameters"]["query"] = "INSERT INTO users (email) VALUES ($1)"
+    node["parameters"]["options"]["queryBatching"] = "transaction"
+    source, _ = generate_postgres_node(node, "run")
+    namespace = {}
+    exec(source, namespace)
+    with pytest.raises(RuntimeError, match="database failure"):
+        namespace["run"]([{"json": {"email": "first"}}, {"json": {"email": "bad"}}], {}, {})
+    assert committed == []
+    assert len(connections) == 1
+    assert namespace["run"]([{"json": {"email": "first"}}, {"json": {"email": "second"}}], {}, {}) == [
+        {"json": {"success": True}}, {"json": {"success": True}}]
+    assert committed == ["first", "second"]
