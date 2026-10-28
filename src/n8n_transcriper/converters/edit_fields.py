@@ -42,14 +42,57 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
         value = assignment.get("value")
         if not isinstance(field, str) or not field or (options.get("dotNotation", True) and ("." in field or "[" in field)):
             raise WorkflowError(f"Узел {name}: неподдерживаемое имя поля {field!r}")
-        if assignment.get("type") != "string" or not isinstance(value, str):
-            raise WorkflowError(f"Узел {name}, поле {field}: пока поддерживаются только строковые значения")
-        expression = compile_expression(value, node=name, parameter=f"assignments.{field}")
-        dependencies.update(expression.dependencies)
-        lines.extend([f"        value = {expression.code}",
-                      f"        if not isinstance(value, str):\n            raise TypeError({('Узел ' + name + ', поле ' + field + ': ожидалась строка')!r})",
-                      f"        data[{field!r}] = value"])
-    source = ('import json\nfrom copy import deepcopy\n\n\n' + f'def {function_name}(items, results, execution):\n' +
+        field_type = assignment.get("type")
+        if field_type not in {"string", "number", "boolean", "object", "array"}:
+            raise WorkflowError(f"Узел {name}, поле {field}: неподдерживаемый тип {field_type!r}")
+        if isinstance(value, str):
+            expression = compile_expression(value, node=name, parameter=f"assignments.{field}")
+            dependencies.update(expression.dependencies)
+            code = expression.code
+        else:
+            code = repr(value)
+        lines.extend([f"        value = convert_value({code}, {field_type!r})", f"        data[{field!r}] = value"])
+    helper = '''def convert_value(value, field_type):
+    if value is None:
+        return None
+    if field_type == "string":
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (str, int)):
+            return str(value)
+        raise TypeError("Строковое значение не может быть корректно преобразовано")
+    if field_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.lower() in ("true", "false"):
+            return value.lower() == "true"
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str) and value.strip() in ("0", "1"):
+            return value.strip() == "1"
+        raise ValueError("Значение не может быть преобразовано в boolean")
+    if field_type == "number":
+        if isinstance(value, (int, float)):
+            return int(value) if isinstance(value, bool) else value
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return 0
+            if re.fullmatch(r"[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?", text):
+                return float(text) if any(c in text for c in ".eE") else int(text)
+        raise ValueError("Значение не может быть преобразовано в number")
+    if field_type in ("object", "array"):
+        if isinstance(value, str):
+            value = json.loads(value)
+        expected = dict if field_type == "object" else list
+        if not isinstance(value, expected):
+            raise TypeError("Некорректный тип JSON-значения")
+        return deepcopy(value)
+    raise ValueError("Неизвестный тип поля")
+'''
+    source = ('import json\nimport re\nfrom copy import deepcopy\n\n\n' + helper + '\n\n' + f'def {function_name}(items, results, execution):\n' +
               '    result = []\n    for item in items:\n' +
               f'        data = deepcopy(item.get("json", {{}})) if {include!r} else {{}}\n' +
               ('\n'.join(lines) + '\n' if lines else '') +
