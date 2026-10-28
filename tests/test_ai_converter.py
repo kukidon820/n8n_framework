@@ -1,17 +1,36 @@
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from n8n_transcriper.converters.ai import generate_deepseek_agent
-from n8n_transcriper.reader import WorkflowError, read_workflow
+from n8n_transcriper.reader import WorkflowError
 from n8n_transcriper.generator import generate_project
 
 
+def model_node():
+    return {
+        "id": "model-1", "name": "DeepSeek Chat Model",
+        "type": "@n8n/n8n-nodes-langchain.lmChatDeepSeek",
+        "parameters": {"model": "deepseek-flash", "options": {
+            "temperature": 0.8, "maxTokens": 2500, "timeout": 180000, "maxRetries": 0,
+        }},
+    }
+
+
+def agent_node():
+    return {
+        "id": "agent-1", "name": "AI Agent - Analyze CSV",
+        "type": "@n8n/n8n-nodes-langchain.agent",
+        "parameters": {"promptType": "define",
+                       "text": "={{ JSON.stringify($('Python - Build CSV').first().json.summary) + $json.csv_text }}",
+                       "options": {"systemMessage": "Analyze the CSV."}},
+    }
+
+
 def test_real_deepseek_agent_prompt_and_settings(monkeypatch):
-    path = next(Path(__file__).resolve().parent.parent.glob("HTTP * Email (2).json"))
-    nodes = {n["name"]: n for n in read_workflow(path)["nodes"]}
+    agent = agent_node()
+    model = model_node()
     calls = []
 
     def post(url, **kwargs):
@@ -21,7 +40,7 @@ def test_real_deepseek_agent_prompt_and_settings(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=post, HTTPError=Exception))
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(DEEPSEEK_API_KEY="test-key"))
-    source, refs = generate_deepseek_agent(nodes["AI Agent - Analyze CSV"], nodes["DeepSeek Chat Model"], "run")
+    source, refs = generate_deepseek_agent(agent, model, "run")
     namespace = {}
     exec(source, namespace)
     result = namespace["run"]([{"json": {"csv_text": "a;b"}}],
@@ -45,11 +64,9 @@ def test_unknown_model_options_fail():
 
 
 def test_generator_connects_model_without_executing_it(tmp_path):
-    path = next(Path(__file__).resolve().parent.parent.glob("HTTP * Email (2).json"))
-    all_nodes = {n["name"]: n for n in read_workflow(path)["nodes"]}
-    agent = dict(all_nodes["AI Agent - Analyze CSV"])
+    agent = agent_node()
     agent["parameters"] = {**agent["parameters"], "text": "={{ $json.csv_text }}"}
-    model = all_nodes["DeepSeek Chat Model"]
+    model = model_node()
     workflow = {"nodes": [agent, model], "connections": {
         model["name"]: {"ai_languageModel": [[{"node": agent["name"], "type": "ai_languageModel", "index": 0}]]}}}
     output = tmp_path / "generated"

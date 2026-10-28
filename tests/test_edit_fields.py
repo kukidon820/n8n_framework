@@ -1,15 +1,27 @@
-from pathlib import Path
-
 import pytest
 
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.generator import generate_project
-from n8n_transcriper.reader import WorkflowError, read_workflow
+from n8n_transcriper.reader import WorkflowError
 
 
 def test_real_settings_and_edit_fields():
-    path = next(Path(__file__).resolve().parent.parent.glob("HTTP * Email (2).json"))
-    nodes = {node["name"]: node for node in read_workflow(path)["nodes"]}
+    nodes = {
+        "Settings": {"name": "Settings", "typeVersion": 3.5, "parameters": {
+            "assignments": {"assignments": [
+                {"name": "mail_to", "type": "string", "value": "test@example.com"},
+            ]},
+        }},
+        "Edit Fields": {"name": "Edit Fields", "typeVersion": 3.5, "parameters": {
+            "assignments": {"assignments": [
+                {"name": "report_text", "type": "string", "value": "={{ $json.output }}"},
+                {"name": "zip_base64", "type": "string",
+                 "value": "={{ $('ZIP - Save attachment base64').first().json.zip_base64 }}"},
+                {"name": "mail_to", "type": "string",
+                 "value": "={{ $('Settings').first().json.mail_to }}"},
+            ]},
+        }},
+    }
     ns = {}
     source, refs = generate_edit_fields(nodes["Settings"], "settings")
     exec(source, ns)
