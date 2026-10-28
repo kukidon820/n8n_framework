@@ -53,6 +53,44 @@ def test_generated_set_reads_previous_node(tmp_path):
     assert result.stdout.strip() == "test@example.com"
 
 
+def test_generated_set_reads_the_linked_item(tmp_path):
+    workflow = {"nodes": [
+        {"id": "1", "name": "Build", "type": "n8n-nodes-base.code", "parameters": {
+            "language": "pythonNative", "pythonCode": 'return [{"json": {"value": 1}}, {"json": {"value": 2}}]'}},
+        {"id": "2", "name": "Reorder", "type": "n8n-nodes-base.code", "parameters": {
+            "language": "pythonNative", "pythonCode": 'return [{"json": _items[1]["json"], "pairedItem": {"item": 1}}, {"json": _items[0]["json"], "pairedItem": {"item": 0}}]'}},
+        {"id": "3", "name": "Copy", "type": "n8n-nodes-base.set", "typeVersion": 3.5,
+         "parameters": {"assignments": {"assignments": [
+             {"name": "copied", "type": "number", "value": "={{ $('Build').item.json.value }}"}]}}},
+    ], "connections": {
+        "Build": {"main": [[{"node": "Reorder", "type": "main", "index": 0}]]},
+        "Reorder": {"main": [[{"node": "Copy", "type": "main", "index": 0}]]},
+    }}
+    output = tmp_path / "generated"
+    generate_project(workflow, output)
+    result = subprocess.run(
+        [sys.executable, "-c", "import main; print(main.run())"],
+        cwd=output, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[{'json': {'copied': 2}}, {'json': {'copied': 1}}]"
+
+
+def test_linked_item_expression_rejects_ambiguous_branching(tmp_path):
+    build = {"id": "1", "name": "Build", "type": "n8n-nodes-base.code", "parameters": {
+        "language": "pythonNative", "pythonCode": "return _items"}}
+    copy = {"id": "2", "name": "Copy", "type": "n8n-nodes-base.set", "typeVersion": 3.5,
+            "parameters": {"assignments": {"assignments": [
+                {"name": "copied", "type": "number", "value": "={{ $('Build').item.json.value }}"}]}}}
+    other = {"id": "3", "name": "Other", "type": "n8n-nodes-base.code", "parameters": {
+        "language": "pythonNative", "pythonCode": "return _items"}}
+    workflow = {"nodes": [build, copy, other], "connections": {
+        "Build": {"main": [[{"node": "Copy", "type": "main", "index": 0},
+                              {"node": "Other", "type": "main", "index": 0}]]}}}
+    with pytest.raises(WorkflowError, match="только в линейных workflow"):
+        generate_project(workflow, tmp_path / "out")
+
+
 def test_empty_output_stops_linear_chain(tmp_path):
     workflow = {"nodes": [
         {"id": "1", "name": "Empty", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "return []"}},
