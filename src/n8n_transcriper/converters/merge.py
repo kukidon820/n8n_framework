@@ -37,7 +37,7 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     if combine_by != "combineByPosition" and count != 2:
         raise WorkflowError(f"Узел {name}: для этого варианта Combine требуются два входа")
     options = p.get("options", {})
-    if not isinstance(options, dict) or set(options) - {"clashHandling", "includeUnpaired", "multipleMatches", "disableDotNotation"}:
+    if not isinstance(options, dict) or set(options) - {"clashHandling", "includeUnpaired", "multipleMatches", "disableDotNotation", "fuzzyCompare"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые опции Merge Combine")
     if combine_by != "combineByFields" and set(options) & {"multipleMatches", "disableDotNotation"}:
         raise WorkflowError(f"Узел {name}: опции сопоставления не применимы к этому варианту Combine")
@@ -56,6 +56,9 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     if not isinstance(include_unpaired, bool) or (include_unpaired and combine_by != "combineByPosition"):
         raise WorkflowError(f"Узел {name}: некорректный includeUnpaired")
     if combine_by == "combineByFields":
+        fuzzy = options.get("fuzzyCompare", False)
+        if not isinstance(fuzzy, bool):
+            raise WorkflowError(f"Узел {name}: fuzzyCompare должен быть логическим")
         join_mode = p.get("joinMode", "keepMatches")
         output_from = p.get("outputDataFrom", "both")
         if join_mode not in {"keepMatches", "keepNonMatches", "keepEverything", "enrichInput1", "enrichInput2"} or output_from not in {"both", "input1", "input2"}:
@@ -91,7 +94,7 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     matched_right = set()
     for left_index, first in enumerate(inputs[0]):
         for right_index, second in enumerate(inputs[1]):
-            if all(match_field(first["json"], second["json"], a, b, {options.get('disableDotNotation', False)!r}) for a, b in {fields!r}):
+            if all(match_field(first["json"], second["json"], a, b, {options.get('disableDotNotation', False)!r}, {fuzzy!r}) for a, b in {fields!r}):
                 matched_pairs.append((left_index, right_index))
                 matched_left.add(left_index)
                 matched_right.add(right_index)
@@ -134,7 +137,8 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
         output.append(combine([items[index] if index < len(items) else {{"json": {{}}}} for items in inputs]))
 '''
     preferred = int(resolution[len("preferInput"):]) - 1 if resolution.startswith("preferInput") else count - 1
-    source = f'''from copy import deepcopy
+    source = f'''import json
+from copy import deepcopy
 
 
 def same_value(left, right):
@@ -161,10 +165,38 @@ def field_value(data, name, literal):
     return True, current
 
 
-def match_field(left, right, first, second, literal):
+def fuzzy_equal(left, right, right_exists):
+    if not right_exists:
+        return left is None or left == "" or left == []
+    if same_value(left, right):
+        return True
+    if (left is None or left == "" or left == []) and (right is None or right == "" or right == []):
+        return True
+    if isinstance(left, str) and not isinstance(right, str):
+        left, right = right, left
+    if isinstance(right, str):
+        if isinstance(left, bool):
+            return right.lower() == ("true" if left else "false") or right == ("1" if left else "0")
+        if isinstance(left, (int, float)) and not isinstance(left, bool):
+            if (isinstance(left, float) and not left.is_integer()) or abs(left) >= 10 ** 21:
+                raise ValueError("Нечёткое сравнение этого числа пока не поддерживается")
+            return str(int(left)) == right
+        if isinstance(left, (dict, list)):
+            try:
+                return same_value(left, json.loads(right))
+            except (ValueError, TypeError):
+                return False
+    if isinstance(left, bool) and isinstance(right, (int, float)) and not isinstance(right, bool):
+        return right == int(left)
+    if isinstance(right, bool) and isinstance(left, (int, float)) and not isinstance(left, bool):
+        return left == int(right)
+    return False
+
+
+def match_field(left, right, first, second, literal, fuzzy):
     left_exists, left_value = field_value(left, first, literal)
     right_exists, right_value = field_value(right, second, literal)
-    return left_exists and right_exists and same_value(left_value, right_value)
+    return left_exists and (fuzzy_equal(left_value, right_value, right_exists) if fuzzy else right_exists and same_value(left_value, right_value))
 
 
 def merge_values(target, source, deep=True, skip_empty=False):
