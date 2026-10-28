@@ -1,5 +1,6 @@
 """Генерация HTTP-функций для поддерживаемых настроек n8n."""
 
+import hashlib
 import keyword
 from typing import Any
 from urllib.parse import urlsplit
@@ -8,19 +9,40 @@ from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
 
+def http_credential_fields(node: dict[str, Any]) -> dict[str, str]:
+    """Получить имена переменных для generic credentials без самих секретов."""
+    params = node.get("parameters", {})
+    if params.get("authentication", "none") != "genericCredentialType":
+        return {}
+    kind = params.get("genericAuthType")
+    fields = {"httpBasicAuth": ("USERNAME", "PASSWORD"), "httpBearerAuth": ("TOKEN",),
+              "httpHeaderAuth": ("HEADER_NAME", "HEADER_VALUE")}
+    if kind not in fields:
+        raise WorkflowError(f"Узел {node.get('name')}: неподдерживаемый тип HTTP credentials {kind!r}")
+    credentials = node.get("credentials", {})
+    credential = credentials.get(kind, {}) if isinstance(credentials, dict) else {}
+    identifier = credential.get("id") if isinstance(credential, dict) else None
+    if not isinstance(identifier, str) or not identifier:
+        raise WorkflowError(f"Узел {node.get('name')}: отсутствует ID HTTP credentials {kind}")
+    prefix = "HTTP_" + hashlib.sha256((kind + ':' + identifier).encode()).hexdigest()[:12].upper()
+    return {field: f"{prefix}_{field}" for field in fields[kind]}
+
+
 def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     """Создать модуль HTTP-запроса; неизвестные настройки отклоняются."""
     name = node.get("name", "<без имени>")
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
         raise WorkflowError(f"Узел {name}: некорректное имя функции")
     p = node.get("parameters", {})
-    allowed = {"method", "url", "options", "authentication", "nodeCredentialType", "sendQuery", "queryParameters", "sendHeaders", "headerParameters", "sendBody", "specifyBody", "jsonBody"}
+    allowed = {"method", "url", "options", "authentication", "nodeCredentialType", "genericAuthType", "sendQuery", "queryParameters", "sendHeaders", "headerParameters", "sendBody", "specifyBody", "jsonBody"}
     unknown = set(p) - allowed
     if unknown:
         raise WorkflowError(f"Узел {name}: неподдерживаемые HTTP-параметры: {', '.join(sorted(unknown))}")
     auth = p.get("authentication", "none")
     gmail = auth == "predefinedCredentialType" and p.get("nodeCredentialType") == "gmailOAuth2"
-    if auth != "none" and not gmail:
+    credential_fields = http_credential_fields(node)
+    generic_type = p.get("genericAuthType") if credential_fields else None
+    if auth != "none" and not gmail and not credential_fields:
         raise WorkflowError(f"Узел {name}: HTTP-аутентификация пока не поддерживается")
     if auth == "none" and "nodeCredentialType" in p:
         raise WorkflowError(f"Узел {name}: задан тип неиспользуемой авторизации")
@@ -47,6 +69,8 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     max_redirects = redirection.get("maxRedirects", 21)
     if not isinstance(follow, bool) or not isinstance(max_redirects, int) or isinstance(max_redirects, bool) or max_redirects < 0:
         raise WorkflowError(f"Узел {name}: некорректные настройки redirect")
+    if generic_type == "httpHeaderAuth" and follow:
+        raise WorkflowError(f"Узел {name}: для header credentials отключите redirect: секрет может попасть на другой адрес")
     proxy = options.get("proxy")
     if proxy is not None and (not isinstance(proxy, str) or not proxy or urlsplit(proxy).username is not None or urlsplit(proxy).password is not None):
         raise WorkflowError(f"Узел {name}: прокси с credentials не поддерживается")
@@ -131,6 +155,13 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         token_response.raise_for_status()
         headers["Authorization"] = "Bearer " + token_response.json()["access_token"]
 ''' if gmail else ""
+    if credential_fields:
+        values = ', '.join('config.' + value for value in credential_fields.values())
+        auth_code += f'        if not all(({values},)):\n            raise ValueError({("Не заданы HTTP credentials для узла " + name)!r})\n'
+        if generic_type == "httpBearerAuth":
+            auth_code += f'        headers["Authorization"] = "Bearer " + config.{credential_fields["TOKEN"]}\n'
+        elif generic_type == "httpHeaderAuth":
+            auth_code += f'        headers[config.{credential_fields["HEADER_NAME"]}] = config.{credential_fields["HEADER_VALUE"]}\n'
     json_output = 'value = response.json() if response.content.strip() else {}\n            values = value if isinstance(value, list) else [value]\n            result.extend({"json": value if value is not None else {}} for value in values)'
     text_output = f'result.append({{"json": {{{output_property!r}: response.text}}}})'
     file_output = f'''binary = dict(item.get("binary", {{}}))
@@ -148,13 +179,15 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         client_options += ', verify=False'
     if proxy is not None:
         client_options += f', proxy={proxy!r}'
+    if generic_type == "httpBasicAuth":
+        client_options += f', auth=(config.{credential_fields["USERNAME"]}, config.{credential_fields["PASSWORD"]})'
     throttle = f'        if item_index and item_index % {batch_size} == 0:\n            time.sleep({batch_interval / 1000!r})\n' if batch_size > 0 and batch_interval > 0 else ''
     lowercase = '        headers = {key.lower(): value for key, value in headers.items()}\n' if options.get("lowercaseHeaders", True) else ''
     return f'''import json
 import time
 
 import httpx
-{"import config" if gmail else ""}
+{"import config" if gmail or credential_fields else ""}
 
 
 def {function_name}(items, results, execution):
