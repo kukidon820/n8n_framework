@@ -34,3 +34,53 @@ def test_convert_py_matches_documented_command(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert (output / "main.py").is_file()
+
+
+def test_validate_checks_conversion_without_creating_output(tmp_path):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(json.dumps({
+        "name": "CLI validation",
+        "nodes": [{
+            "id": "1", "name": "Build", "type": "n8n-nodes-base.code",
+            "parameters": {"language": "pythonNative", "pythonCode": "return _items"},
+        }],
+        "connections": {},
+    }), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate", str(workflow)])
+
+    assert result.exit_code == 0, result.output
+    assert "Проверка workflow пройдена" in result.output
+    assert "Узлов: 1" in result.output
+    assert "Синтаксис сгенерированного Python проверен" in result.output
+    assert not (tmp_path / "generated").exists()
+
+
+def test_validate_reports_node_and_stage_for_unsupported_node(tmp_path):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(json.dumps({
+        "nodes": [{
+            "id": "1", "name": "Unsupported node", "type": "custom.unknown",
+            "parameters": {},
+        }],
+        "connections": {},
+    }), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate", str(workflow)])
+
+    assert result.exit_code == 1
+    assert "Проверка workflow не пройдена" in result.output
+    assert "Этап: проверка поддержки узлов" in result.output
+    assert "Unsupported node" in result.output
+    assert "WorkflowError" in result.output
+
+
+def test_validate_reports_json_parse_location(tmp_path):
+    workflow = tmp_path / "broken.json"
+    workflow.write_text('{"nodes": [}', encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate", str(workflow)])
+
+    assert result.exit_code == 1
+    assert "Этап: чтение JSON" in result.output
+    assert "line 1 column" in result.output

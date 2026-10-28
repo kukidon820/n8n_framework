@@ -35,6 +35,12 @@ uv run n8n-transcriper convert workflow.json --out generated
 uv run n8n-transcriper inspect workflow.json
 ```
 
+Подробно проверить структуру, соединения, поддержку узлов, expressions и синтаксис сгенерированного Python без сохранения файлов:
+
+```bash
+uv run n8n-transcriper validate workflow.json
+```
+
 Короткая команда `uv run python convert.py workflow.json --out generated` эквивалентна команде `convert`.
 
 ## Запуск сгенерированного проекта
