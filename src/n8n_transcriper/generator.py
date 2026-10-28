@@ -213,7 +213,9 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
                 calls.append(f"    items = {'deepcopy(' + value + ')' if fanout else value}")
             is_condition = kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}
             count = output_count if is_condition else 1
-            ready = "all(merge_inputs)" if kind == "n8n-nodes-base.merge" else "items"
+            merge_options = node.get("parameters", {}).get("options", {})
+            include_unpaired = isinstance(merge_options, dict) and merge_options.get("includeUnpaired", False)
+            ready = ("any(merge_inputs)" if include_unpaired else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
             calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", f"    if {ready}:",
                           f"        logging.info({(name + ': started')!r})"])
             if node.get("executeOnce", False):

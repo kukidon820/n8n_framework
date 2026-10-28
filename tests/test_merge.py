@@ -4,6 +4,7 @@ import sys
 import pytest
 
 from n8n_transcriper.generator import generate_project
+from n8n_transcriper.converters.merge import generate_merge_node
 from n8n_transcriper.reader import WorkflowError
 
 
@@ -38,3 +39,62 @@ def test_merge_without_all_inputs_fails(tmp_path):
         "connections": {"Start": {"main": [[edge("Merge")]]}}}
     with pytest.raises(WorkflowError, match="каждый вход"):
         generate_project(workflow, tmp_path / "output")
+
+
+def make_combine(combine_by, options=None, **params):
+    node = {"name": "Merge", "typeVersion": 3.2, "parameters": {"mode": "combine", "combineBy": combine_by,
+            "options": options or {}, **params}}
+    source, count = generate_merge_node(node, "run")
+    namespace = {}
+    exec(source, namespace)
+    assert count == 2
+    return namespace["run"]
+
+
+def test_combine_by_position_deep_merge_and_unpaired():
+    run = make_combine("combineByPosition", {"includeUnpaired": True})
+    first = [{"json": {"id": 1, "nested": {"a": 1}, "list": [1, 2]}, "binary": {"file": {"data": b"x"}}},
+             {"json": {"id": 2}}]
+    second = [{"json": {"nested": {"b": 2}, "list": [9]}}]
+    result = run([first, second])
+    assert result[0]["json"] == {"id": 1, "nested": {"a": 1, "b": 2}, "list": [9, 2]}
+    assert result[0]["binary"]["file"]["data"] == b"x"
+    assert result[1]["json"] == {"id": 2}
+
+
+def test_combine_all_conflicts_and_suffixed_fields():
+    first = [{"json": {"value": "a"}}, {"json": {"value": "b"}}]
+    second = [{"json": {"value": "c"}}, {"json": {"value": "d"}}]
+    run = make_combine("combineAll", {"clashHandling": {"values": {"resolveClash": "addSuffix"}}})
+    result = run([first, second])
+    assert len(result) == 4
+    assert result[0]["json"] == {"value_1": "a", "value_2": "c"}
+
+
+def test_combine_by_fields_matches_types_and_duplicates():
+    run = make_combine("combineByFields", fieldsToMatchString="id")
+    result = run([[{"json": {"id": 1, "left": 1}}, {"json": {"id": "1"}}],
+                  [{"json": {"id": 1, "right": "a"}}, {"json": {"id": 1, "right": "b"}}]])
+    assert [entry["json"]["right"] for entry in result] == ["a", "b"]
+    result = run([[{"json": {"id": 1.0}}, {"json": {"id": True}}], [{"json": {"id": 1}}]])
+    assert len(result) == 1
+
+
+def test_unsupported_merge_modes_fail():
+    with pytest.raises(WorkflowError, match="Append и Combine"):
+        generate_merge_node({"name": "Merge", "typeVersion": 3, "parameters": {"mode": "chooseBranch"}}, "run")
+
+
+def test_generated_combine_workflow(tmp_path):
+    workflow = {"nodes": [node("Start", "return _items"),
+        node("Left", 'return [{"json": {"left": 1, "same": "left"}}]'),
+        node("Right", 'return [{"json": {"right": 2, "same": "right"}}]'),
+        {"id": "m", "name": "Merge", "type": "n8n-nodes-base.merge", "typeVersion": 3.2,
+         "parameters": {"mode": "combine", "combineBy": "combineByPosition"}}],
+        "connections": {"Start": {"main": [[edge("Left"), edge("Right")]]},
+                        "Left": {"main": [[edge("Merge", 0)]]}, "Right": {"main": [[edge("Merge", 1)]]}}}
+    output = tmp_path / "output"
+    generate_project(workflow, output)
+    script = 'import main; assert main.run()[0]["json"] == {"left": 1, "right": 2, "same": "right"}'
+    result = subprocess.run([sys.executable, "-c", script], cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
