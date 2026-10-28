@@ -9,6 +9,8 @@ from n8n_transcriper.reader import WorkflowError
 
 @dataclass(frozen=True)
 class Expression:
+    """Скомпилированное Python-выражение и имена узлов, от которых оно зависит."""
+
     code: str
     dependencies: frozenset[str]
 
@@ -19,6 +21,7 @@ _TEMPLATE = re.compile(r"{{\s*(.*?)\s*}}", re.DOTALL)
 
 
 def _split_top_level(value: str, delimiter: str) -> list[str]:
+    """Разделить строку, не затрагивая разделители внутри кавычек и скобок."""
     parts = []
     start = 0
     stack = []
@@ -54,6 +57,7 @@ def _split_top_level(value: str, delimiter: str) -> list[str]:
 
 
 def _expression(value: str) -> Expression:
+    """Преобразовать поддерживаемое подмножество JavaScript-выражений."""
     value = value.strip()
     # JavaScript && и || возвращают один из операндов, а не обязательно bool.
     for operator in ("||", "&&"):
@@ -186,6 +190,7 @@ def _expression(value: str) -> Expression:
 
 
 def _selector(value: str) -> Expression:
+    """Скомпилировать ссылку на текущий item, вход или именованный узел."""
     match = _ROOT.match(value)
     if not match:
         raise ValueError("поддерживаются только ссылки на данные n8n")
@@ -225,7 +230,11 @@ def _selector(value: str) -> Expression:
 
 
 def compile_expression(value: str, *, node: str, parameter: str) -> Expression:
-    """Вернуть Python-код и зависимости или понятную ошибку преобразования."""
+    """Скомпилировать n8n expression и сообщить контекст при ошибке.
+
+    Обычный текст остаётся строковым литералом; шаблонные вставки и выражения
+    преобразуются во время генерации, поэтому runtime не читает workflow JSON.
+    """
     try:
         text = value[1:] if value.startswith("=") else value
         matches = list(_TEMPLATE.finditer(text))

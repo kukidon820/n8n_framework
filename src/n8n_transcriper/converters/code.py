@@ -23,11 +23,13 @@ def generate_code_node(node: dict[str, Any], function_name: str) -> str:
     if mode not in ("runOnceForAllItems", "runOnceForEachItem"):
         raise WorkflowError(f"Узел {name}: неподдерживаемый режим {mode!r}")
     body = textwrap.indent(code.rstrip(), "    ")
-    source = f"def {function_name}(_items):\n{body}\n"
+    source = f'def {function_name}(_items):\n    """Выполнить исходный Python Code Node для всех items."""\n{body}\n'
     if mode == "runOnceForEachItem":
         source = (
             f"def {function_name}(_items):\n"
+            '    """Запустить исходный Python Code Node для каждого item."""\n'
             "    def run_item(_item):\n"
+            '        """Выполнить исходное тело узла для одного item."""\n'
             f"{textwrap.indent(code.rstrip(), '        ')}\n"
             "    return [run_item(item) for item in _items]\n"
         )
@@ -37,7 +39,8 @@ def generate_code_node(node: dict[str, Any], function_name: str) -> str:
     except SyntaxError as exc:
         raise WorkflowError(f"Узел {name}: ошибка Python-кода: {exc.msg}") from exc
     allowed = {"_items"} if mode == "runOnceForAllItems" else {"_item"}
-    code_tree = tree.body[0].body[0] if mode == "runOnceForEachItem" else tree
+    item_body = tree.body[0].body[1]
+    code_tree = ast.Module(body=item_body.body[1:], type_ignores=[]) if mode == "runOnceForEachItem" else tree
     unsupported = sorted({n.id for n in ast.walk(code_tree) if isinstance(n, ast.Name)
                           and isinstance(n.ctx, ast.Load)
                           and n.id in {"_items", "_item", "_input", "_json", "_binary"}

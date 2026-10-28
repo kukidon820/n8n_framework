@@ -1,4 +1,4 @@
-"""Read and validate an n8n workflow without changing its configuration."""
+"""Чтение и проверка JSON-файла workflow n8n."""
 
 import json
 from pathlib import Path
@@ -6,11 +6,11 @@ from typing import Any
 
 
 class WorkflowError(ValueError):
-    """The input is not a valid n8n workflow."""
+    """Входной workflow некорректен или содержит неподдерживаемую настройку."""
 
 
 def read_workflow(path: str | Path) -> dict[str, Any]:
-    """Load a UTF-8 workflow and validate the structure needed by the converter."""
+    """Прочитать UTF-8 JSON и проверить структуру workflow для конвертера."""
     try:
         with Path(path).open(encoding="utf-8-sig") as source:
             workflow = json.load(source)
@@ -21,6 +21,7 @@ def read_workflow(path: str | Path) -> dict[str, Any]:
 
 
 def validate_workflow(workflow: Any) -> None:
+    """Проверить узлы и ссылки connections, нужные для построения графа."""
     if not isinstance(workflow, dict):
         raise WorkflowError("Workflow must be a JSON object")
     nodes = workflow.get("nodes")

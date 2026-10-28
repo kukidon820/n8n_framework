@@ -50,6 +50,7 @@ import config
 
 
 def {function_name}(items, results, execution):
+    """Вызвать DeepSeek и вернуть ответы модели как n8n items."""
     if not config.DEEPSEEK_API_KEY:
         raise ValueError("Не задан DEEPSEEK_API_KEY")
     output = []

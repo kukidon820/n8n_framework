@@ -159,11 +159,13 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         raise WorkflowError(f"Узел {name}: некорректные настройки повторов")
 
     def expression(value: Any, parameter: str) -> str:
+        """Скомпилировать значение-параметр и привязать ошибку к его имени."""
         if isinstance(value, str):
             return compile_expression(value, node=name, parameter=parameter).code
         return repr(value)
 
     def pairs(enabled: str, field: str) -> str:
+        """Собрать словарь query-параметров или заголовков из настроек узла."""
         if not p.get(enabled, False):
             if field in p:
                 raise WorkflowError(f"Узел {name}: {field} задан без {enabled}")
@@ -392,6 +394,7 @@ import httpx
 
 
 def {function_name}(items, results, execution):
+    """Выполнить HTTP-запрос для каждого входного item."""
     result = []
     for item_index, item in enumerate(items):
 {throttle}
