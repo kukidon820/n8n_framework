@@ -69,8 +69,6 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     max_redirects = redirection.get("maxRedirects", 21)
     if not isinstance(follow, bool) or not isinstance(max_redirects, int) or isinstance(max_redirects, bool) or max_redirects < 0:
         raise WorkflowError(f"Узел {name}: некорректные настройки redirect")
-    if generic_type == "httpHeaderAuth" and follow:
-        raise WorkflowError(f"Узел {name}: для header credentials отключите redirect: секрет может попасть на другой адрес")
     proxy = options.get("proxy")
     if proxy is not None and (not isinstance(proxy, str) or not proxy or urlsplit(proxy).username is not None or urlsplit(proxy).password is not None):
         raise WorkflowError(f"Узел {name}: прокси с credentials не поддерживается")
@@ -254,11 +252,23 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         client_options += f', proxy={proxy!r}'
     if generic_type == "httpBasicAuth":
         client_options += f', auth=(config.{credential_fields["USERNAME"]}, config.{credential_fields["PASSWORD"]})'
+    redirect_guard = ""
+    if follow and (gmail or credential_fields):
+        secret_header = f'config.{credential_fields["HEADER_NAME"]}' if generic_type == "httpHeaderAuth" else '"Authorization"'
+        redirect_guard = f'''        def origin(url):
+            parts = urlsplit(str(url))
+            return (parts.scheme.lower(), parts.hostname, parts.port or (443 if parts.scheme.lower() == "https" else 80))
+        original_origin = origin(request_url)
+        def strip_credentials_on_redirect(request):
+            if origin(request.url) != original_origin:
+                request.headers.pop({secret_header}, None)
+'''
+        client_options += ', event_hooks={"request": [strip_credentials_on_redirect]}'
     throttle = f'        if item_index and item_index % {batch_size} == 0:\n            time.sleep({batch_interval / 1000!r})\n' if batch_size > 0 and batch_interval > 0 else ''
     lowercase = '        headers = {key.lower(): value for key, value in headers.items()}\n' if options.get("lowercaseHeaders", True) else ''
     return f'''import json
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 {"import config" if gmail or credential_fields else ""}
@@ -269,11 +279,12 @@ def {function_name}(items, results, execution):
     for item_index, item in enumerate(items):
 {throttle}
         headers = {headers}
-{lowercase}{body}{auth_code}
+        request_url = {url_code}
+{lowercase}{body}{auth_code}{redirect_guard}
         with httpx.Client({client_options}) as client:
             for attempt in range({tries}):
                 try:
-                    response = client.request({method.upper()!r}, {url_code}, params={params}, headers=headers{body_argument})
+                    response = client.request({method.upper()!r}, request_url, params={params}, headers=headers{body_argument})
                     response.raise_for_status()
                     break
                 except httpx.HTTPError:
