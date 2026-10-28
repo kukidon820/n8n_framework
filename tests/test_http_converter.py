@@ -120,12 +120,54 @@ def test_generic_credentials_from_config(monkeypatch, kind, values):
         assert headers[0]["Authorization"] == "Bearer secret"
 
 
-def test_header_credentials_reject_cross_origin_redirect():
+def test_header_credentials_protect_cross_origin_redirect(monkeypatch):
+    import httpx
+    requests = []
+    real_client = httpx.Client
+    def handle(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(302, headers={"Location": "https://other.example/path"})
+        return httpx.Response(200, json={})
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {"name": "API", "typeVersion": 4.2, "parameters": {"url": "https://example.com",
-        "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth"},
+        "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
+        "options": {"response": {"response": {"responseFormat": "json"}}}},
         "credentials": {"httpHeaderAuth": {"id": "id"}}}
-    with pytest.raises(WorkflowError, match="redirect"):
-        generate_http_node(node, "request")
+    fields = http_credential_fields(node)
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields["HEADER_NAME"]: "X-API-Key", fields["HEADER_VALUE"]: "secret"}))
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    assert namespace["request"]([{"json": {}}], {}, {}) == [{"json": {}}]
+    assert requests[0].headers["x-api-key"] == "secret"
+    assert "x-api-key" not in requests[1].headers
+
+
+@pytest.mark.parametrize("kind,values", [("httpBasicAuth", {"USERNAME": "user", "PASSWORD": "password"}),
+                                         ("httpBearerAuth", {"TOKEN": "secret"})])
+def test_auth_is_removed_on_http_to_https_redirect(monkeypatch, kind, values):
+    import httpx
+    requests = []
+    real_client = httpx.Client
+    def handle(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(302, headers={"Location": "https://example.com/path"})
+        return httpx.Response(200, json={})
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    node = {"name": "API", "typeVersion": 4.2, "parameters": {"url": "http://example.com",
+        "authentication": "genericCredentialType", "genericAuthType": kind,
+        "options": {"response": {"response": {"responseFormat": "json"}}}},
+        "credentials": {kind: {"id": "id"}}}
+    fields = http_credential_fields(node)
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields[key]: value for key, value in values.items()}))
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    namespace["request"]([{"json": {}}], {}, {})
+    assert "authorization" in requests[0].headers
+    assert "authorization" not in requests[1].headers
 
 
 def test_generated_config_contains_only_placeholders(tmp_path):
