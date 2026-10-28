@@ -18,5 +18,6 @@ packages = ["src/n8n_transcriper"]
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "psycopg[binary]>=3.3.6",
     "pytest>=8",
 ]
