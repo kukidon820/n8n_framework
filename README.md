@@ -13,7 +13,7 @@ uv sync
 uv run python convert.py workflow.json --out generated
 ```
 
-Каталог `generated` должен отсутствовать или быть пустым. В нём появятся `main.py`, `config.py`, `requirements.txt`, `README.md`, `conversion_report.md` и модули для используемых узлов.
+Каталог `generated` должен отсутствовать или быть пустым. В нём появятся `main.py`, `config.py`, `pyproject.toml`, `uv.lock`, `requirements.txt`, `README.md`, `conversion_report.md` и модули для используемых узлов. При конвертации uv разрешит зависимости и создаст lock-файл.
 
 ## Команды
 
@@ -45,24 +45,12 @@ uv run n8n-transcriper validate workflow.json
 
 ## Запуск сгенерированного проекта
 
-Перейдите в каталог результата, создайте окружение и установите только нужные этому workflow зависимости:
+Перейдите в каталог результата и установите точные версии из lock-файла:
 
 ```bash
 cd generated
-uv venv
-uv pip install -r requirements.txt
-```
-
-Windows PowerShell:
-
-```powershell
-.venv\Scripts\python.exe main.py
-```
-
-Linux/macOS:
-
-```bash
-.venv/bin/python main.py
+uv sync --locked
+uv run python main.py
 ```
 
 Триггеры n8n не запускаются. Если workflow ожидает входные данные, передайте items вручную:

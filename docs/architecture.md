@@ -10,7 +10,7 @@
 2. `graph.py` преобразует `connections` в связи и вычисляет топологический порядок по каналу `main`.
 3. `expressions.py` переводит поддерживаемые expressions в Python и собирает зависимости от именованных узлов.
 4. `converters/` генерирует код для конкретных типов узлов.
-5. `generator.py` соединяет модули в `main.py`, создаёт `config.py`, `requirements.txt`, README и отчёт.
+5. `generator.py` соединяет модули в `main.py`, создаёт `config.py`, `pyproject.toml`, `requirements.txt`, README и отчёт; CLI запускает `uv lock` и создаёт `uv.lock`.
 
 AI-соединение `ai_languageModel` связывает подключённую chat-модель с Agent и не становится отдельным последовательным вызовом. Для агента без инструментов генерируется HTTP-вызов OpenAI-compatible Chat Completions API; адрес и credentials находятся в `config.py`. Неизвестные дополнительные каналы и неподдерживаемые графы отклоняются с `WorkflowError`.
 
@@ -48,4 +48,4 @@ src/n8n_transcriper/
 
 ## Credentials и зависимости
 
-`config.py` читает секреты из переменных окружения. `requirements.txt` содержит только библиотеки, необходимые узлам конкретного workflow: например, `httpx` для HTTP и AI Chat Completions, `psycopg[binary]` для PostgreSQL. Секреты workflow не копируются в generated source.
+`config.py` читает секреты из переменных окружения. `pyproject.toml` содержит только библиотеки, необходимые узлам конкретного workflow; `uv.lock` фиксирует разрешённые версии для воспроизводимой установки через `uv sync --locked`. `requirements.txt` остаётся экспортом зависимостей для совместимости. Секреты workflow не копируются в generated source.
