@@ -103,8 +103,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             source = generate_http_node(node, function)
             http_credentials.update(http_credential_fields(node).values())
             params = node["parameters"]
-            values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody"))]
-            for key in ("headerParameters", "queryParameters"):
+            values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody")), ("body", params.get("body"))]
+            for key in ("headerParameters", "queryParameters", "bodyParameters"):
                 values.extend((key, pair.get("value")) for pair in params.get(key, {}).get("parameters", []))
             references = set()
             for parameter, value in values:
