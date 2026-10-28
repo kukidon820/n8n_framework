@@ -31,7 +31,7 @@ def test_real_http_node_retries_and_splits_json(monkeypatch):
             calls.append((method, url, kwargs))
             if len(calls) == 1:
                 raise HTTPError("temporary")
-            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: [{"id": 1}, {"id": 2}])
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: [{"id": 1}, {"id": 2}], content=b"json")
 
     monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=HTTPError))
     monkeypatch.setattr("time.sleep", sleeps.append)
@@ -47,3 +47,43 @@ def test_unsupported_authentication_is_not_ignored():
     node = {"name": "send", "parameters": {"url": "https://example.com", "authentication": "other"}}
     with pytest.raises(WorkflowError, match="аутентификация"):
         generate_http_node(node, "send")
+
+
+def test_transport_options_batching_and_autodetect(monkeypatch):
+    calls, sleeps, settings = [], [], []
+
+    class Client:
+        def __init__(self, **kwargs): settings.append(kwargs)
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def request(self, method, url, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return SimpleNamespace(raise_for_status=lambda: None, headers={"content-type": "text/plain"}, text="hello")
+            return SimpleNamespace(raise_for_status=lambda: None, headers={"content-type": "application/pdf"}, content=b"pdf")
+
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=Exception))
+    monkeypatch.setattr("time.sleep", sleeps.append)
+    node = {"name": "HTTP", "typeVersion": 4.2, "parameters": {"url": "https://example.com", "sendHeaders": True,
+        "headerParameters": {"parameters": [{"name": "X-Test", "value": "v"}]},
+        "options": {"batching": {"batch": {"batchSize": 1, "batchInterval": 250}},
+                    "allowUnauthorizedCerts": True, "lowercaseHeaders": True,
+                    "redirect": {"redirect": {"followRedirects": False, "maxRedirects": 3}},
+                    "proxy": "http://proxy.example:8080"}}}
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    result = namespace["request"]([{"json": {"n": 1}}, {"json": {"n": 2}, "binary": {"old": {"data": b"a"}}}], {}, {})
+    assert result[0] == {"json": {"data": "hello"}}
+    assert result[1]["json"] == {"n": 2}
+    assert result[1]["binary"]["old"]["data"] == b"a"
+    assert result[1]["binary"]["data"]["data"] == b"pdf"
+    assert sleeps == [0.25]
+    assert calls[0]["headers"] == {"x-test": "v"}
+    assert settings[0] == {"timeout": 300.0, "follow_redirects": False, "max_redirects": 3,
+                           "verify": False, "proxy": "http://proxy.example:8080"}
+
+
+def test_proxy_secrets_not_embedded():
+    node = {"name": "HTTP", "parameters": {"url": "https://example.com", "options": {"proxy": "http://user:secret@proxy:8080"}}}
+    with pytest.raises(WorkflowError, match="credentials"):
+        generate_http_node(node, "request")

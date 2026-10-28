@@ -20,6 +20,7 @@ class HTTPError(Exception):
 class Response:
     def __init__(self, value):
         self.value = value
+        self.content = b"json"
     def raise_for_status(self):
         pass
     def json(self):
