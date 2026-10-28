@@ -1,17 +1,29 @@
 import base64
 from io import BytesIO
-from pathlib import Path
 from zipfile import ZipFile
 
 import pytest
 
 from n8n_transcriper.converters.files import generate_file_node
-from n8n_transcriper.reader import WorkflowError, read_workflow
+from n8n_transcriper.reader import WorkflowError
 
 
 def test_real_workflow_file_chain():
-    path = next(Path(__file__).resolve().parent.parent.glob("HTTP * Email (2).json"))
-    nodes = {node["name"]: node for node in read_workflow(path)["nodes"]}
+    nodes = {
+        "CSV - Create file": {"name": "CSV - Create file", "type": "n8n-nodes-base.convertToFile",
+            "parameters": {"operation": "toText", "sourceProperty": "csv_text",
+                          "options": {"addBOM": True, "encoding": "utf8", "fileName": "tasks.csv"}}},
+        "ZIP - Compress": {"name": "ZIP - Compress", "type": "n8n-nodes-base.compression",
+            "parameters": {"operation": "compress", "fileName": "tasks.zip", "binaryPropertyOutput": "archive"}},
+        "ZIP - Save attachment base64": {"name": "ZIP - Save attachment base64", "type": "n8n-nodes-base.extractFromFile",
+            "parameters": {"operation": "binaryToPropery", "binaryPropertyName": "archive",
+                          "destinationKey": "zip_base64", "options": {"keepSource": "both"}}},
+        "ZIP - Decompress for AI": {"name": "ZIP - Decompress for AI", "type": "n8n-nodes-base.compression",
+            "parameters": {"operation": "decompress", "binaryPropertyName": "archive"}},
+        "CSV - Read file for AI": {"name": "CSV - Read file for AI", "type": "n8n-nodes-base.extractFromFile",
+            "parameters": {"operation": "text", "binaryPropertyName": "file_0", "destinationKey": "csv_text",
+                          "options": {"encoding": "utf8", "stripBOM": True}}},
+    }
     data = [{"json": {"csv_text": "имя;значение\r\nтест;1\r\n", "summary": 1}}]
     for name in ("CSV - Create file", "ZIP - Compress", "ZIP - Save attachment base64",
                  "ZIP - Decompress for AI", "CSV - Read file for AI"):

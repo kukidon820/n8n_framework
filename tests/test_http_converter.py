@@ -1,17 +1,21 @@
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from n8n_transcriper.converters.http import generate_http_node, http_credential_fields
-from n8n_transcriper.reader import WorkflowError, read_workflow
+from n8n_transcriper.reader import WorkflowError
 from n8n_transcriper.generator import generate_project
 
 
 def test_real_http_node_retries_and_splits_json(monkeypatch):
-    path = next(Path(__file__).resolve().parent.parent.glob("HTTP * Email (2).json"))
-    node = next(n for n in read_workflow(path)["nodes"] if n["name"] == "HTTP - Get todos")
+    node = {
+        "name": "HTTP - Get todos", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2,
+        "retryOnFail": True, "maxTries": 2, "waitBetweenTries": 2000,
+        "parameters": {"url": "https://jsonplaceholder.typicode.com/todos", "method": "GET",
+                       "options": {"timeout": 30000,
+                                   "response": {"response": {"responseFormat": "json"}}}},
+    }
     calls = []
     sleeps = []
 
