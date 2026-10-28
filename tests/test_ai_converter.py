@@ -55,5 +55,5 @@ def test_generator_connects_model_without_executing_it(tmp_path):
     output = tmp_path / "generated"
     generate_project(workflow, output)
     assert 'DEEPSEEK_API_KEY' in (output / "config.py").read_text(encoding="utf-8")
-    assert len(list((output / "ai_nodes").glob("node_*.py"))) == 1
-    assert "deepseek-flash" in next((output / "ai_nodes").glob("node_*.py")).read_text(encoding="utf-8")
+    assert len(list((output / "ai_nodes").glob("ai_agent_analyze_csv.py"))) == 1
+    assert "deepseek-flash" in (output / "ai_nodes" / "ai_agent_analyze_csv.py").read_text(encoding="utf-8")

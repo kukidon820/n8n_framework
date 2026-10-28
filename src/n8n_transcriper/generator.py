@@ -1,6 +1,9 @@
 """Генерация самостоятельного проекта для поддерживаемого линейного workflow."""
 
+import hashlib
+import keyword
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +17,29 @@ from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgr
 from n8n_transcriper.graph import connections, execution_order
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
+
+
+def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """Создать читаемые и устойчивые имена модулей из имён и ID узлов."""
+    reserved = {"logging", "uuid", "deepcopy", "run", "postgres", "config", "main", "__init__", "items", "results", "execution", "input_data"}
+    reserved.update({"con", "prn", "aux", "nul"})
+    reserved.update(f"{prefix}{i}" for prefix in ("com", "lpt") for i in range(1, 10))
+    candidates = {}
+    for name in nodes:
+        stem = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:72] or "node"
+        if not stem.isidentifier() or keyword.iskeyword(stem) or stem in reserved or re.fullmatch(r"output_\d+", stem):
+            stem = "node_" + stem
+        candidates[name] = stem
+    counts = Counter(candidates.values())
+    result = {}
+    for name, stem in candidates.items():
+        if counts[stem] > 1:
+            suffix = hashlib.sha256(nodes[name]["id"].encode("utf-8")).hexdigest()[:12]
+            stem += "_" + suffix
+        result[name] = stem
+    if len(set(result.values())) != len(result):
+        raise WorkflowError("Не удалось построить уникальные имена модулей")
+    return result
 
 
 def generate_project(workflow: dict[str, Any], output: Path) -> None:
@@ -57,6 +83,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         edge = parent.get(name)
         ancestors[name] = ({edge.source} | ancestors[edge.source]) if edge else set()
     aliases = {name: f"output_{index:03d}" for index, name in enumerate(order)}
+    module_names = _module_names(nodes)
     files: dict[str, str] = {}
     imports = []
     calls = []
@@ -85,8 +112,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             if branching:
                 calls.append(f"    {aliases[name]} = [items]")
             continue
-        stem = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "node"
-        stem = f"node_{index:03d}_{stem}"
+        stem = module_names[name]
         function = "run_node"
         if kind == "n8n-nodes-base.code":
             folder = "python_nodes"
