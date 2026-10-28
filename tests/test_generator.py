@@ -71,3 +71,19 @@ def test_unimplemented_execution_settings_fail_before_writing(tmp_path, setting,
     with pytest.raises(WorkflowError, match=setting):
         generate_project({"nodes": [node], "connections": {}}, output)
     assert not output.exists()
+
+
+def test_fanout_branches_use_same_source(tmp_path):
+    def code(name, source):
+        return {"id": name, "name": name, "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": source}}
+    workflow = {"nodes": [
+        code("Source", 'return [{"json": {"value": 3}}]'),
+        code("Double", '_items[0]["json"]["value"] *= 2\nreturn _items'),
+        code("Triple", 'return [{"json": {"value": _items[0]["json"]["value"] * 3}}]'),
+    ], "connections": {"Source": {"main": [[{"node": "Double", "type": "main", "index": 0},
+                                                  {"node": "Triple", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "generated"
+    generate_project(workflow, output)
+    result = subprocess.run([sys.executable, "-c", "import main; assert main.run() == [{'json': {'value': 6}}, {'json': {'value': 9}}]"],
+                            cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

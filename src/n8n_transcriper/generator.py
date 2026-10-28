@@ -47,12 +47,10 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         raise WorkflowError("Поддерживается только одно дерево без объединения входов")
     for source in main_nodes:
         ports = [edge.output for edge in main_edges if edge.source == source]
-        if len(ports) != len(set(ports)):
-            raise WorkflowError(f"Узел {source}: несколько соединений одного выхода пока не поддерживаются")
-        if nodes[source]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} and (len(ports) > 1 or any(port != 0 for port in ports)):
+        if nodes[source]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} and any(port != 0 for port in ports):
             raise WorkflowError(f"Узел {source}: неподдерживаемые выходы")
     order = [name for name in execution_order(workflow) if name not in model_names]
-    branching = any(nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} for name in main_nodes)
+    branching = any(nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} or outgoing[name] > 1 for name in main_nodes)
     parent = {edge.target: edge for edge in main_edges}
     ancestors = {}
     for name in order:
@@ -167,7 +165,9 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         if branching:
             edge = parent.get(name)
             if edge:
-                calls.append(f"    items = {aliases[edge.source]}[{edge.output}]")
+                fanout = sum(1 for e in main_edges if e.source == edge.source and e.output == edge.output) > 1
+                value = f"{aliases[edge.source]}[{edge.output}]"
+                calls.append(f"    items = {'deepcopy(' + value + ')' if fanout else value}")
             is_condition = kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}
             count = output_count if is_condition else 1
             calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", "    if items:",
@@ -186,7 +186,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         raise WorkflowError("Workflow не содержит исполняемых поддерживаемых узлов")
     terminal = [name for name in order if outgoing[name] == 0 and nodes[name]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.manualTrigger"}]
     return_code = ' + '.join(f'{aliases[name]}[0]' for name in terminal) or '[]' if branching else 'items'
-    files["main.py"] = ('import logging\nimport uuid\n\n' + '\n'.join(imports) +
+    files["main.py"] = ('import logging\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
         '\n\n\ndef run(input_data=None):\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + f'\n    return {return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')
     config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
