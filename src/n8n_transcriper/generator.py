@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from n8n_transcriper.converters.code import generate_code_node
+from n8n_transcriper.converters.ai import generate_deepseek_agent
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import generate_file_node
 from n8n_transcriper.converters.http import generate_http_node
@@ -15,19 +16,33 @@ from n8n_transcriper.reader import WorkflowError
 def generate_project(workflow: dict[str, Any], output: Path) -> None:
     """Создать проект; неподдерживаемые схемы отклоняются до записи файлов."""
     edges = connections(workflow)
-    if any(edge.channel != "main" or edge.target_type != "main" or edge.output != 0 or edge.input != 0 for edge in edges):
-        raise WorkflowError("Пока поддерживаются только линейные основные соединения")
     nodes = {node["name"]: node for node in workflow["nodes"]}
     if not nodes:
         raise WorkflowError("Workflow не содержит узлов")
-    incoming = {name: 0 for name in nodes}
-    outgoing = {name: 0 for name in nodes}
-    for edge in edges:
+    models: dict[str, str] = {}
+    auxiliary = [edge for edge in edges if edge.channel != "main"]
+    for edge in auxiliary:
+        if (edge.channel != "ai_languageModel" or edge.target_type != "ai_languageModel" or
+                edge.output != 0 or edge.input != 0 or edge.target in models or
+                nodes[edge.source]["type"] != "@n8n/n8n-nodes-langchain.lmChatDeepSeek" or
+                nodes[edge.target]["type"] != "@n8n/n8n-nodes-langchain.agent"):
+            raise WorkflowError("Пока поддерживаются только линейные основные соединения и одна модель DeepSeek")
+        models[edge.target] = edge.source
+    model_names = set(models.values())
+    if len(model_names) != len(models):
+        raise WorkflowError("Одна модель не может быть подключена к нескольким агентам")
+    main_edges = [edge for edge in edges if edge.channel == "main"]
+    if any(edge.target_type != "main" or edge.output != 0 or edge.input != 0 or edge.source in model_names or edge.target in model_names for edge in main_edges):
+        raise WorkflowError("Пока поддерживаются только линейные основные соединения")
+    main_nodes = set(nodes) - model_names
+    incoming = {name: 0 for name in main_nodes}
+    outgoing = {name: 0 for name in main_nodes}
+    for edge in main_edges:
         incoming[edge.target] += 1
         outgoing[edge.source] += 1
-    if len(edges) != len(nodes) - 1 or any(v > 1 for v in incoming.values()) or any(v > 1 for v in outgoing.values()):
+    if len(main_edges) != len(main_nodes) - 1 or any(v > 1 for v in incoming.values()) or any(v > 1 for v in outgoing.values()):
         raise WorkflowError("Пока поддерживается только одна линейная цепочка узлов")
-    order = execution_order(workflow)
+    order = [name for name in execution_order(workflow) if name not in model_names]
     files: dict[str, str] = {}
     imports = []
     calls = []
@@ -35,6 +50,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     skipped = 0
     dependencies: set[str] = set()
     completed: set[str] = set()
+    uses_deepseek = False
     for index, name in enumerate(order):
         node = nodes[name]
         kind = node["type"]
@@ -66,6 +82,17 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             if missing:
                 raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
             arguments = "items, results, execution"
+        elif kind == "@n8n/n8n-nodes-langchain.agent":
+            if name not in models:
+                raise WorkflowError(f"Узел {name}: не подключена модель DeepSeek")
+            folder = "ai_nodes"
+            source, references = generate_deepseek_agent(node, nodes[models[name]], function)
+            missing = references - completed
+            if missing:
+                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+            arguments = "items, results, execution"
+            dependencies.add("httpx>=0.27")
+            uses_deepseek = True
         else:
             raise WorkflowError(f"Узел {name}: неподдерживаемый тип {kind}")
         files[f"{folder}/{stem}.py"] = source
@@ -79,10 +106,10 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     files["main.py"] = ('import logging\nimport uuid\n\n' + '\n'.join(imports) +
         '\n\n\ndef run(input_data=None):\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + '\n    return items\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')
-    files["config.py"] = '"""Настройки авторизации появятся здесь при поддержке credentials."""\n'
+    files["config.py"] = ('import os\n\n# Ключ модели DeepSeek; задайте переменную окружения.\nDEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")\n' if uses_deepseek else '"""Настройки авторизации."""\n')
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
     files["README.md"] = '# Сгенерированный проект\n\nУстановите зависимости: `pip install -r requirements.txt`. Запуск: `python main.py`.\n'
-    files["conversion_report.md"] = f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. Преобразовано: {converted}. Триггеров пропущено: {skipped}.\n'
+    files["conversion_report.md"] = f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n'
     output = Path(output)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise WorkflowError(f"Каталог назначения не пуст: {output}")
