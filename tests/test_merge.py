@@ -98,3 +98,21 @@ def test_generated_combine_workflow(tmp_path):
     script = 'import main; assert main.run()[0]["json"] == {"left": 1, "right": 2, "same": "right"}'
     result = subprocess.run([sys.executable, "-c", script], cwd=output, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("keepMatches", [(1, "both")]),
+    ("keepNonMatches", [(2, "left"), (3, "right")]),
+    ("keepEverything", [(1, "both"), (2, "left"), (3, "right")]),
+    ("enrichInput1", [(1, "both"), (2, "left")]),
+    ("enrichInput2", [(1, "both"), (3, "right")]),
+])
+def test_combine_join_modes(mode, expected):
+    run = make_combine("combineByFields", fieldsToMatchString="id", joinMode=mode)
+    first = [{"json": {"id": 1, "left": True}}, {"json": {"id": 2, "left": True}}]
+    second = [{"json": {"id": 1, "right": True}}, {"json": {"id": 3, "right": True}}]
+    result = run([first, second])
+    actual = [(entry["json"]["id"], "both" if "left" in entry["json"] and "right" in entry["json"] else "left" if "left" in entry["json"] else "right") for entry in result]
+    assert actual == expected
+    if mode == "keepNonMatches":
+        assert [entry["json"]["_source"] for entry in result] == ["input1", "input2"]

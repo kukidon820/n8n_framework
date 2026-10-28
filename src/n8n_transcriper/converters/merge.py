@@ -56,8 +56,12 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     if not isinstance(include_unpaired, bool) or (include_unpaired and combine_by != "combineByPosition"):
         raise WorkflowError(f"Узел {name}: некорректный includeUnpaired")
     if combine_by == "combineByFields":
-        if p.get("joinMode", "keepMatches") != "keepMatches" or p.get("outputDataFrom", "both") != "both":
-            raise WorkflowError(f"Узел {name}: поддерживается только объединение совпадений обоих входов")
+        join_mode = p.get("joinMode", "keepMatches")
+        output_from = p.get("outputDataFrom", "both")
+        if join_mode not in {"keepMatches", "keepNonMatches", "keepEverything", "enrichInput1", "enrichInput2"} or output_from not in {"both", "input1", "input2"}:
+            raise WorkflowError(f"Узел {name}: неподдерживаемый вариант результата Combine")
+        if join_mode not in {"keepMatches", "keepNonMatches"} and output_from != "both":
+            raise WorkflowError(f"Узел {name}: outputDataFrom неприменим к выбранному joinMode")
         if options.get("multipleMatches", "all") not in {"all", "first"} or options.get("disableDotNotation", False) not in (True, False):
             raise WorkflowError(f"Узел {name}: неподдерживаемые настройки сопоставления")
         if p.get("advanced", False):
@@ -74,12 +78,50 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
             fields = [(field.strip(), field.strip()) for field in value.split(",")]
         if not fields or any(not isinstance(a, str) or not isinstance(b, str) or not a or not b or any(c in a + b for c in ".[") for a, b in fields):
             raise WorkflowError(f"Узел {name}: поддерживаются только простые имена полей")
-        pairs = f'''    for first in inputs[0]:
-        for second in inputs[1]:
+        if resolution == "preferLast" and "resolveClash" not in clash and join_mode == "enrichInput2":
+            resolution = "preferInput1"
+        pairs = f'''    if not inputs[0] or not inputs[1]:
+        if {join_mode!r} == "keepMatches" or ({join_mode!r} == "enrichInput1" and not inputs[0]) or ({join_mode!r} == "enrichInput2" and not inputs[1]):
+            return []
+        if {join_mode!r} == "keepNonMatches" and (({output_from!r} == "input1" and not inputs[0]) or ({output_from!r} == "input2" and not inputs[1])):
+            return []
+        return deepcopy(inputs[0] + inputs[1])
+    matched_pairs = []
+    matched_left = set()
+    matched_right = set()
+    for left_index, first in enumerate(inputs[0]):
+        for right_index, second in enumerate(inputs[1]):
             if all(a in first["json"] and b in second["json"] and same_value(first["json"][a], second["json"][b]) for a, b in {fields!r}):
-                output.append(combine([first, second]))
+                matched_pairs.append((left_index, right_index))
+                matched_left.add(left_index)
+                matched_right.add(right_index)
                 if {options.get("multipleMatches", "all") == "first"!r}:
                     break
+    if {join_mode!r} != "keepNonMatches":
+        if {join_mode!r} == "keepMatches" and {output_from!r} == "input1":
+            output.extend(deepcopy(item) for index, item in enumerate(inputs[0]) if index in matched_left)
+        elif {join_mode!r} == "keepMatches" and {output_from!r} == "input2":
+            output.extend(deepcopy(item) for index, item in enumerate(inputs[1]) if index in matched_right)
+        else:
+            output.extend(combine([inputs[0][left], inputs[1][right]]) for left, right in matched_pairs)
+    if {join_mode!r} in ("keepNonMatches", "keepEverything", "enrichInput1"):
+        for index, item in enumerate(inputs[0]):
+            if index not in matched_left and ({join_mode!r} != "keepNonMatches" or {output_from!r} in ("both", "input1")):
+                entry = deepcopy(item)
+                if {join_mode!r} == "keepNonMatches" and {output_from!r} == "both":
+                    entry["json"]["_source"] = "input1"
+                elif {resolution == 'addSuffix'!r} and {join_mode!r} != "keepNonMatches":
+                    entry["json"] = {{f"{{key}}_1": value for key, value in entry["json"].items()}}
+                output.append(entry)
+    if {join_mode!r} in ("keepNonMatches", "keepEverything", "enrichInput2"):
+        for index, item in enumerate(inputs[1]):
+            if index not in matched_right and ({join_mode!r} != "keepNonMatches" or {output_from!r} in ("both", "input2")):
+                entry = deepcopy(item)
+                if {join_mode!r} == "keepNonMatches" and {output_from!r} == "both":
+                    entry["json"]["_source"] = "input2"
+                elif {resolution == 'addSuffix'!r} and {join_mode!r} != "keepNonMatches":
+                    entry["json"] = {{f"{{key}}_2": value for key, value in entry["json"].items()}}
+                output.append(entry)
 '''
     elif combine_by == "combineAll":
         pairs = '''    for first in inputs[0]:
