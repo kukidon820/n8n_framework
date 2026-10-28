@@ -49,7 +49,7 @@ uv pip install -r requirements.txt
 uv run pytest
 ```
 
-Тесты HTTP, AI Chat Completions и Gmail используют mock-ответы; отправка реальной почты и запросы к API не требуются.
+Тесты HTTP, AI Chat Completions и SMTP используют mock-ответы; отправка реальной почты и запросы к API не требуются.
 
 `tests/test_postgres_integration.py` проверяет работу с PostgreSQL и пропускается без `N8N_TEST_POSTGRES_PORT`. Тест подключается к базе `workflow_test` как `postgres` с тестовым паролем `temporary_test_password`, поэтому используйте только отдельную локальную тестовую БД. Для запуска задайте порт сервера, доступного на localhost:
 

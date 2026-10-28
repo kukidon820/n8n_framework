@@ -81,16 +81,14 @@ result = run([{"json": {"name": "Пример"}}])
 
 ```powershell
 $env:OPENROUTER_CHAT_MODEL_API_KEY = "..."
-$env:GMAIL_CLIENT_ID = "..."
-$env:GMAIL_CLIENT_SECRET = "..."
-$env:GMAIL_REFRESH_TOKEN = "..."
+$env:SMTP_USERNAME = "your-account@gmail.com"
+$env:SMTP_APP_PASSWORD = "пароль-приложения"
 ```
 
 ```bash
 export OPENROUTER_CHAT_MODEL_API_KEY="..."
-export GMAIL_CLIENT_ID="..."
-export GMAIL_CLIENT_SECRET="..."
-export GMAIL_REFRESH_TOKEN="..."
+export SMTP_USERNAME="your-account@gmail.com"
+export SMTP_APP_PASSWORD="app-password"
 ```
 
 Заполняйте только переменные, перечисленные в `generated/config.py`. Не добавляйте реальные ключи и пароли в Git.
@@ -101,6 +99,7 @@ export GMAIL_REFRESH_TOKEN="..."
 |---|---|
 | Python Code | Исходный Python-код переносится в функцию; поддерживаются режимы «все items» и «каждый item» |
 | HTTP Request | Отдельная функция для каждого узла, базовые методы, тела запросов, заголовки, параметры, credentials, таймауты, повторы и форматы ответов |
+| Отправка в Gmail API `users/me/messages/send` | SMTP через `smtp.gmail.com:587` с STARTTLS и паролем приложения; остальные Gmail API запросы используют OAuth2 |
 | Convert to File, Compression, Extract From File | Текстовые файлы, ZIP, распаковка, извлечение текста и base64 |
 | Edit Fields (Set) | Присваивания, типы значений, выбор сохраняемых полей и ссылки на предыдущие узлы |
 | IF и Switch | Условия, правила маршрутизации, fallback и несколько совпавших выходов |
