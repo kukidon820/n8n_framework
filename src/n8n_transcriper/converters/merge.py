@@ -142,6 +142,7 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     preferred = int(resolution[len("preferInput"):]) - 1 if resolution.startswith("preferInput") else count - 1
     source = f'''import json
 from copy import deepcopy
+from decimal import Decimal
 
 
 def same_value(left, right):
@@ -168,7 +169,31 @@ def field_value(data, name, literal):
     return True, current
 
 
-def fuzzy_equal(left, right, right_exists):
+def js_number_string(value):
+    if isinstance(value, int) and not isinstance(value, bool):
+        if abs(value) <= 9007199254740991:
+            return str(value)
+        value = float(value)
+    if value == 0:
+        return "0"
+    text = repr(float(value)).lower()
+    if "e" not in text:
+        return text[:-2] if text.endswith(".0") else text
+    mantissa, exponent_text = text.split("e")
+    exponent = int(exponent_text)
+    if -6 <= exponent < 21:
+        expanded = format(Decimal(text), "f")
+        return expanded.rstrip("0").rstrip(".") if "." in expanded else expanded
+    if mantissa.endswith(".0"):
+        mantissa = mantissa[:-2]
+    return f"{{mantissa}}e{{'+' if exponent >= 0 else ''}}{{exponent}}"
+
+
+def fuzzy_equal(left, right, left_exists, right_exists):
+    if not left_exists and not right_exists:
+        return True
+    if not left_exists:
+        return right_exists and (right is None or right == "" or right == [])
     if not right_exists:
         return left is None or left == "" or left == []
     if same_value(left, right):
@@ -181,9 +206,7 @@ def fuzzy_equal(left, right, right_exists):
         if isinstance(left, bool):
             return right.lower() == ("true" if left else "false") or right == ("1" if left else "0")
         if isinstance(left, (int, float)) and not isinstance(left, bool):
-            if (isinstance(left, float) and not left.is_integer()) or abs(left) >= 10 ** 21:
-                raise ValueError("Нечёткое сравнение этого числа пока не поддерживается")
-            return str(int(left)) == right
+            return js_number_string(left) == right
         if isinstance(left, (dict, list)):
             try:
                 return same_value(left, json.loads(right))
@@ -199,7 +222,8 @@ def fuzzy_equal(left, right, right_exists):
 def match_field(left, right, first, second, literal, fuzzy):
     left_exists, left_value = field_value(left, first, literal)
     right_exists, right_value = field_value(right, second, literal)
-    return left_exists and (fuzzy_equal(left_value, right_value, right_exists) if fuzzy else right_exists and same_value(left_value, right_value))
+    return (fuzzy_equal(left_value, right_value, left_exists, right_exists) if fuzzy
+            else left_exists and right_exists and same_value(left_value, right_value))
 
 
 def merge_values(target, source, deep=True, skip_empty=False):
