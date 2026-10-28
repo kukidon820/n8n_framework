@@ -45,3 +45,31 @@ def test_forward_reference_rejected_before_output(tmp_path):
     with pytest.raises(WorkflowError, match="Missing"):
         generate_project({"nodes": [node], "connections": {}}, tmp_path / "out")
     assert not (tmp_path / "out").exists()
+
+
+def test_typed_assignments_and_expressions():
+    assignments = [
+        {"name": "count", "type": "number", "value": "={{ $json.count }}"},
+        {"name": "enabled", "type": "boolean", "value": "FALSE"},
+        {"name": "object", "type": "object", "value": '{"a":1}'},
+        {"name": "array", "type": "array", "value": [1, 2]},
+        {"name": "text", "type": "string", "value": "={{ $json.data }}"},
+        {"name": "empty", "type": "number", "value": None},
+    ]
+    node = {"name": "Edit", "typeVersion": 3.5, "parameters": {"assignments": {"assignments": assignments}}}
+    source, _ = generate_edit_fields(node, "run")
+    namespace = {}
+    exec(source, namespace)
+    result = namespace["run"]([{"json": {"count": "12.5", "data": {"ok": True}}}], {}, {})
+    assert result == [{"json": {"count": 12.5, "enabled": False, "object": {"a": 1},
+                                "array": [1, 2], "text": '{"ok":true}', "empty": None}}]
+
+
+def test_invalid_boolean_does_not_become_true():
+    node = {"name": "Edit", "typeVersion": 3.5, "parameters": {"assignments": {"assignments": [
+        {"name": "enabled", "type": "boolean", "value": "no"}]}}}
+    source, _ = generate_edit_fields(node, "run")
+    namespace = {}
+    exec(source, namespace)
+    with pytest.raises(ValueError, match="boolean"):
+        namespace["run"]([{"json": {}}], {}, {})
