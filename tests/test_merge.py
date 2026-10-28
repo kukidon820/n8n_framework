@@ -124,3 +124,9 @@ def test_combine_by_nested_or_literal_dot_fields():
     literal = make_combine("combineByFields", {"disableDotNotation": True}, fieldsToMatchString="person.id")
     assert len(literal([[{"json": {"person.id": 4}}], [{"json": {"person.id": 4}}]])) == 1
     assert literal([[{"json": {"person": {"id": 4}}}], [{"json": {"person": {"id": 4}}}]]) == []
+
+
+@pytest.mark.parametrize("left,right", [(3, "3"), (True, "TRUE"), (False, 0), (None, ""), ([1], "[1]")])
+def test_combine_fuzzy_comparison(left, right):
+    run = make_combine("combineByFields", {"fuzzyCompare": True}, fieldsToMatchString="id")
+    assert len(run([[{"json": {"id": left}}], [{"json": {"id": right}}]])) == 1
