@@ -59,3 +59,15 @@ def test_strict_comparisons_preserve_javascript_types():
     assert namespace["inverse"]({"json": {"first": "a === b"}}) is False
     with pytest.raises(WorkflowError, match="цепочка сравнений"):
         compile_expression("={{ $json.a === $json.b !== true }}", node="IF", parameter="condition")
+
+
+def test_logical_operators_use_javascript_truth_and_short_circuit():
+    result = compile_expression("={{ ($json.a || $json.b) && !$json.c }}", node="IF", parameter="condition")
+    namespace = {}
+    exec("def check(item):\n    return " + result.code, namespace)
+    assert namespace["check"]({"json": {"a": [], "c": False}}) is True
+    assert namespace["check"]({"json": {"a": 0, "b": "", "c": True}}) == ""
+    assert namespace["check"]({"json": {"a": False, "b": 4, "c": True}}) is False
+    comparison = compile_expression("={{ !$json.a === true }}", node="IF", parameter="condition")
+    exec("def check(item):\n    return " + comparison.code, namespace)
+    assert namespace["check"]({"json": {"a": False}}) is True

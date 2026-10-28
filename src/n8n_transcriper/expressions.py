@@ -55,6 +55,39 @@ def _split_top_level(value: str, delimiter: str) -> list[str]:
 
 def _expression(value: str) -> Expression:
     value = value.strip()
+    # JavaScript && и || возвращают один из операндов, а не обязательно bool.
+    for operator in ("||", "&&"):
+        quote = None
+        escaped = False
+        depth = 0
+        for index, char in enumerate(value):
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+            elif char in "'\"":
+                quote = char
+            elif char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth -= 1
+            elif depth == 0 and value.startswith(operator, index):
+                left = _expression(value[:index])
+                right = _expression(value[index + 2:])
+                truth = "(v is not None and v is not False and v != 0 and v != '')"
+                result = f"v if {truth} else {right.code}" if operator == "||" else f"{right.code} if {truth} else v"
+                return Expression(f"(lambda v: {result})({left.code})", left.dependencies | right.dependencies)
+    if value.startswith("(") and value.endswith(")"):
+        # Проверка гарантирует, что внешние скобки охватывают всё выражение.
+        try:
+            _split_top_level(value[1:-1], ",")
+        except ValueError:
+            pass
+        else:
+            return _expression(value[1:-1])
     comparisons = []
     for operator in ("===", "!=="):
         # Подстановка разделителя выполняется только вне строк и вложенных скобок.
@@ -95,6 +128,9 @@ def _expression(value: str) -> Expression:
             raise ValueError("сложение без строкового операнда не поддерживается")
         return Expression("''.join([" + ", ".join(part.code for part in compiled) + "])",
                           frozenset().union(*(part.dependencies for part in compiled)))
+    if value.startswith("!") and not value.startswith("!="):
+        inner = _expression(value[1:])
+        return Expression(f"(lambda v: v is None or v is False or v == 0 or v == '')({inner.code})", inner.dependencies)
     if value.startswith("JSON.stringify(") and value.endswith(")"):
         inner = _expression(value[len("JSON.stringify("):-1])
         return Expression(f"json.dumps({inner.code}, ensure_ascii=False, separators=(',', ':'))", inner.dependencies)
