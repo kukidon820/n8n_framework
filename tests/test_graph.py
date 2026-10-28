@@ -1,9 +1,7 @@
-from pathlib import Path
-
 import pytest
 
 from n8n_transcriper.graph import connections, execution_order
-from n8n_transcriper.reader import WorkflowError, read_workflow
+from n8n_transcriper.reader import WorkflowError
 
 
 def node(name):
@@ -14,9 +12,16 @@ def link(name, index=0, kind="main"):
     return {"node": name, "type": kind, "index": index}
 
 
-def test_real_workflow_connections():
-    path = next(Path(__file__).resolve().parent.parent.glob("HTTP * Email (2).json"))
-    workflow = read_workflow(path)
+def test_model_connections_and_execution_order():
+    names = ["Settings", "Python - Build CSV", "AI Agent - Analyze CSV",
+             "DeepSeek Chat Model", "Edit Fields", "HTTP - Send email with ZIP"]
+    workflow = {"nodes": [node(name) for name in names], "connections": {
+        "Settings": {"main": [[link("Python - Build CSV")]]},
+        "Python - Build CSV": {"main": [[link("AI Agent - Analyze CSV")]]},
+        "DeepSeek Chat Model": {"ai_languageModel": [[link("AI Agent - Analyze CSV", kind="ai_languageModel")]]},
+        "AI Agent - Analyze CSV": {"main": [[link("Edit Fields")]]},
+        "Edit Fields": {"main": [[link("HTTP - Send email with ZIP")]]},
+    }}
     edges = connections(workflow)
     assert any(e.source == "DeepSeek Chat Model" and e.target == "AI Agent - Analyze CSV"
                and e.channel == "ai_languageModel" for e in edges)

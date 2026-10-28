@@ -1,10 +1,8 @@
 import pytest
 import json
-from pathlib import Path
 
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
-from n8n_transcriper.reader import read_workflow
 
 
 def test_named_node_and_nested_paths():
@@ -30,8 +28,14 @@ def test_unsupported_javascript_does_not_silently_convert():
 
 
 def test_real_prompt_and_gmail_body():
-    path = next(Path(__file__).resolve().parent.parent.glob("HTTP * Email (2).json"))
-    nodes = {n["name"]: n for n in read_workflow(path)["nodes"]}
+    nodes = {
+        "AI Agent - Analyze CSV": {"parameters": {
+            "text": "=Stats {{ JSON.stringify($('Python - Build CSV').first().json.summary) }} CSV {{ $json.csv_text }}",
+        }},
+        "HTTP - Send email with ZIP": {"parameters": {
+            "jsonBody": "={{ JSON.stringify({raw: $json.raw}) }}",
+        }},
+    }
     prompt = compile_expression(nodes["AI Agent - Analyze CSV"]["parameters"]["text"], node="AI", parameter="text")
     assert prompt.dependencies == {"Python - Build CSV"}
     namespace = {"json": json}
