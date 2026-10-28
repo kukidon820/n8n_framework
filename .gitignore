@@ -15,3 +15,4 @@ venv/
 *.md
 !README.md
 !docs/*.md
+HTTP → Python CSV → ZIP → DeepSeek Agent → HTTP Email (2).json

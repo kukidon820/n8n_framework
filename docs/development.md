@@ -16,6 +16,7 @@ uv sync
 uv run n8n-transcriper --help
 uv run n8n-transcriper convert workflow.json --out generated
 uv run n8n-transcriper inspect workflow.json
+uv run n8n-transcriper validate workflow.json
 ```
 
 Для быстрого запуска преобразования также есть wrapper:
