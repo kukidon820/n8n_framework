@@ -70,7 +70,7 @@ def generate_condition_node(node: dict[str, Any], function_name: str) -> tuple[s
         if not isinstance(options, dict) or set(options) - {"fallbackOutput", "allMatchingOutputs", "renameFallbackOutput"}:
             raise WorkflowError(f"Узел {name}: неподдерживаемые настройки Switch")
         fallback = options.get("fallbackOutput", "none")
-        if fallback not in ("none", "extra"):
+        if fallback not in ("none", "extra") and (not isinstance(fallback, int) or isinstance(fallback, bool) or not 0 <= fallback < len(rules["values"])):
             raise WorkflowError(f"Узел {name}: неподдерживаемый fallback")
         all_matches = options.get("allMatchingOutputs", False)
         if not isinstance(all_matches, bool):
@@ -85,6 +85,8 @@ def generate_condition_node(node: dict[str, Any], function_name: str) -> tuple[s
             body += f'        if {"True" if all_matches else "not matched"} and ({expression}):\n            outputs[{index}].append(item)\n            matched = True\n'
         if fallback == "extra":
             body += f'        if not matched:\n            outputs[{count - 1}].append(item)\n'
+        elif isinstance(fallback, int):
+            body += f'        if not matched:\n            outputs[{fallback}].append(item)\n'
     else:
         raise WorkflowError(f"Узел {name}: неподдерживаемый тип маршрутизации")
     helper = '''def compare(left, right, kind, operation, case_sensitive):

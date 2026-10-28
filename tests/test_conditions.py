@@ -72,3 +72,14 @@ def test_unselected_branch_is_never_executed(tmp_path):
     output = tmp_path / "output"
     generate_project(workflow, output)
     assert execute(output, [{"json": {"status": True}}]) == [{"json": {"branch": "good"}}]
+
+
+def test_switch_fallback_routes_to_existing_output(tmp_path):
+    node = {"id": "s", "name": "Switch", "type": "n8n-nodes-base.switch", "typeVersion": 3.2,
+            "parameters": {"rules": {"values": [{"conditions": condition("yes")}, {"conditions": condition("maybe")}]},
+                           "options": {"fallbackOutput": 1}}}
+    workflow = {"nodes": [node, code_node("First", "first"), code_node("Second", "second")],
+                "connections": {"Switch": {"main": [[edge("First")], [edge("Second")]]}}}
+    output = tmp_path / "output"
+    generate_project(workflow, output)
+    assert execute(output, [{"json": {"status": "other"}}]) == [{"json": {"branch": "second"}}]
