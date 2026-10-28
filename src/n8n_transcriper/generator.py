@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from n8n_transcriper.converters.code import generate_code_node
+from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import generate_file_node
 from n8n_transcriper.converters.http import generate_http_node
 from n8n_transcriper.graph import connections, execution_order
@@ -33,6 +34,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     converted = 0
     skipped = 0
     dependencies: set[str] = set()
+    completed: set[str] = set()
     for index, name in enumerate(order):
         node = nodes[name]
         kind = node["type"]
@@ -57,6 +59,13 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
             source = generate_http_node(node, function)
             arguments = "items, results, execution"
             dependencies.add("httpx>=0.27")
+        elif kind == "n8n-nodes-base.set":
+            folder = "operations"
+            source, references = generate_edit_fields(node, function)
+            missing = references - completed
+            if missing:
+                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+            arguments = "items, results, execution"
         else:
             raise WorkflowError(f"Узел {name}: неподдерживаемый тип {kind}")
         files[f"{folder}/{stem}.py"] = source
@@ -64,6 +73,7 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
         imports.append(f"from {folder}.{stem} import {function} as {stem}")
         calls.extend([f"    logging.info({(name + ': started')!r})", f"    items = {stem}({arguments})", f"    results[{name!r}] = items", f"    logging.info({(name + ': completed')!r})"])
         converted += 1
+        completed.add(name)
     if not converted:
         raise WorkflowError("Workflow не содержит исполняемых поддерживаемых узлов")
     files["main.py"] = ('import logging\nimport uuid\n\n' + '\n'.join(imports) +

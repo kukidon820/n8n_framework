@@ -34,3 +34,18 @@ def test_unsupported_example_fails_without_partial_output(tmp_path):
     with pytest.raises(WorkflowError, match="соединения"):
         generate_project(read_workflow(path), output)
     assert not output.exists()
+
+
+def test_generated_set_reads_previous_node(tmp_path):
+    workflow = {"nodes": [
+        {"id": "1", "name": "Settings", "type": "n8n-nodes-base.set", "typeVersion": 3.4,
+         "parameters": {"assignments": {"assignments": [{"name": "mail", "type": "string", "value": "test@example.com"}]}}},
+        {"id": "2", "name": "Copy", "type": "n8n-nodes-base.set", "typeVersion": 3.5,
+         "parameters": {"assignments": {"assignments": [{"name": "to", "type": "string", "value": "={{ $('Settings').first().json.mail }}"}]}}},
+    ], "connections": {"Settings": {"main": [[{"node": "Copy", "type": "main", "index": 0}]]}}}
+    output = tmp_path / "generated"
+    generate_project(workflow, output)
+    result = subprocess.run([sys.executable, "-c", "import main; print(main.run()[0]['json']['to'])"],
+                            cwd=output, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "test@example.com"
