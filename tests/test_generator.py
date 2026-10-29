@@ -8,6 +8,19 @@ from n8n_transcriper.generator import generate_project
 from n8n_transcriper.reader import WorkflowError
 
 
+def test_generate_project_can_return_files_without_writing_them(tmp_path):
+    workflow = {"nodes": [{
+        "id": "1", "name": "Build", "type": "n8n-nodes-base.code",
+        "parameters": {"language": "pythonNative", "pythonCode": "return _items"},
+    }], "connections": {}}
+
+    files = generate_project(workflow)
+
+    assert "main.py" in files
+    assert any(path.startswith("python_nodes/") for path in files)
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_generated_pyproject_declares_only_required_dependencies(tmp_path):
     node = {
         "id": "http", "name": "Fetch", "type": "n8n-nodes-base.httpRequest",
