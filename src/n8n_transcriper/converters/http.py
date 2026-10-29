@@ -11,6 +11,37 @@ from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
 
+def http_secret_header_fields(node: dict[str, Any]) -> dict[int, str]:
+    """Вернуть config-переменные для статических значений секретных HTTP-заголовков."""
+    params = node.get("parameters", {})
+    group = params.get("headerParameters", {}) if isinstance(params, dict) else {}
+    entries = group.get("parameters", []) if isinstance(group, dict) else []
+    if not isinstance(entries, list):
+        return {}
+
+    node_id = str(node.get("id") or node.get("name") or "http-node")
+    fields = {}
+    for index, pair in enumerate(entries):
+        if not isinstance(pair, dict):
+            continue
+        name = pair.get("name")
+        value = pair.get("value")
+        if not isinstance(name, str) or not isinstance(value, str) or not value.strip():
+            continue
+        normalized = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        parts = set(normalized.split("-"))
+        sensitive_parts = {
+            "authorization", "auth", "token", "secret", "password", "credential", "credentials", "cookie", "apikey",
+        }
+        sensitive = bool(parts & sensitive_parts) or {"api", "key"} <= parts
+        if not sensitive or value.startswith("=") or "{{" in value:
+            continue
+        label = re.sub(r"[^A-Z0-9]+", "_", name.upper()).strip("_")[:24] or "SECRET"
+        digest = hashlib.sha256(f"{node_id}:{normalized}:{index}".encode("utf-8")).hexdigest()[:12].upper()
+        fields[index] = f"HTTP_HEADER_{label}_{digest}"
+    return fields
+
+
 def http_credential_fields(node: dict[str, Any]) -> dict[str, str]:
     """Получить имена переменных для generic credentials без самих секретов."""
     params = node.get("parameters", {})
@@ -44,6 +75,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     auth = p.get("authentication", "none")
     gmail = auth == "predefinedCredentialType" and p.get("nodeCredentialType") == "gmailOAuth2"
     credential_fields = http_credential_fields(node)
+    secret_header_fields = http_secret_header_fields(node)
     generic_type = p.get("genericAuthType") if credential_fields else None
     if auth != "none" and not gmail and not credential_fields:
         raise WorkflowError(f"Узел {name}: HTTP-аутентификация пока не поддерживается")
@@ -174,12 +206,12 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         if not isinstance(group, dict) or set(group) != {"parameters"} or not isinstance(group["parameters"], list):
             raise WorkflowError(f"Узел {name}: некорректный {field}")
         entries = []
-        for pair in group["parameters"]:
+        for index, pair in enumerate(group["parameters"]):
             if not isinstance(pair, dict) or set(pair) != {"name", "value"} or not isinstance(pair["name"], str):
                 raise WorkflowError(f"Узел {name}: некорректный элемент {field}")
-            if field == "headerParameters" and pair["name"].lower() in {"authorization", "proxy-authorization", "x-api-key", "cookie"}:
-                raise WorkflowError(f"Узел {name}: секретный заголовок {pair['name']!r} требует отдельной поддержки credentials")
-            entries.append(f"{pair['name']!r}: {expression(pair['value'], field)}")
+            secret_field = secret_header_fields.get(index) if field == "headerParameters" else None
+            value = f"config.{secret_field}" if secret_field else expression(pair["value"], field)
+            entries.append(f"{pair['name']!r}: {value}")
         return "{" + ", ".join(entries) + "}"
 
     params = pairs("sendQuery", "queryParameters")
@@ -320,26 +352,28 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     if generic_type == "httpBasicAuth":
         client_options += f', auth=(config.{credential_fields["USERNAME"]}, config.{credential_fields["PASSWORD"]})'
     redirect_guard = ""
-    if follow and (gmail or credential_fields) and not send_credentials_cross_origin:
-        if generic_type == "httpQueryAuth":
-            redirect_guard = f'''        def origin(url):
+    if follow and (gmail or credential_fields or secret_header_fields) and not send_credentials_cross_origin:
+        headers_to_strip = []
+        if gmail or generic_type in {"httpBasicAuth", "httpBearerAuth"}:
+            headers_to_strip.append('"Authorization"')
+        elif generic_type == "httpHeaderAuth":
+            headers_to_strip.append(f'config.{credential_fields["HEADER_NAME"]}')
+        for index in secret_header_fields:
+            headers_to_strip.append(repr(p["headerParameters"]["parameters"][index]["name"]))
+        strip_header_lines = "".join(
+            f"                request.headers.pop({header}, None)\n" for header in headers_to_strip
+        )
+        strip_query_line = (
+            f'                request.url = request.url.copy_with(params=request.url.params.remove(config.{credential_fields["NAME"]}))\n'
+            if generic_type == "httpQueryAuth" else ""
+        )
+        redirect_guard = f'''        def origin(url):
             parts = urlsplit(str(url))
             return (parts.scheme.lower(), parts.hostname, parts.port or (443 if parts.scheme.lower() == "https" else 80))
         original_origin = origin(request_url)
         def strip_credentials_on_redirect(request):
             if origin(request.url) != original_origin:
-                request.url = request.url.copy_with(params=request.url.params.remove(config.{credential_fields["NAME"]}))
-'''
-        else:
-            secret_header = f'config.{credential_fields["HEADER_NAME"]}' if generic_type == "httpHeaderAuth" else '"Authorization"'
-            redirect_guard = f'''        def origin(url):
-            parts = urlsplit(str(url))
-            return (parts.scheme.lower(), parts.hostname, parts.port or (443 if parts.scheme.lower() == "https" else 80))
-        original_origin = origin(request_url)
-        def strip_credentials_on_redirect(request):
-            if origin(request.url) != original_origin:
-                request.headers.pop({secret_header}, None)
-'''
+{strip_header_lines}{strip_query_line}'''
         client_options += ', event_hooks={"request": [strip_credentials_on_redirect]}'
     throttle = f'        if item_index and item_index % {batch_size} == 0:\n            time.sleep({batch_interval / 1000!r})\n' if batch_size > 0 and batch_interval > 0 else ''
     lowercase = '        headers = {key.lower(): value for key, value in headers.items()}\n' if options.get("lowercaseHeaders", True) else ''
@@ -385,17 +419,21 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
                  '            request_url = next_url\n')
     else:
         fetch = f'        page_params = {params}\n' + request_block + output_block
+    secret_header_checks = "".join(
+        f'    if not config.{field}:\n        raise ValueError({("Заполните " + field + " для секретного заголовка узла " + name)!r})\n'
+        for field in secret_header_fields.values()
+    )
     return f'''import json
 import time
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-{"import config" if gmail or credential_fields else ""}
+{"import config" if gmail or credential_fields or secret_header_fields else ""}
 
 
 def {function_name}(items, results, execution):
     """Выполнить HTTP-запрос для каждого входного item."""
-    result = []
+{secret_header_checks}    result = []
     for item_index, item in enumerate(items):
 {throttle}
         headers = {headers}
