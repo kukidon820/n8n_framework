@@ -58,6 +58,41 @@ def test_real_prompt_and_gmail_body():
     assert json.loads(namespace["body"]({"json": {"raw": "abc"}})) == {"raw": "abc"}
 
 
+def test_json_body_object_with_pretty_named_node_stringify():
+    expression = '''={{
+      {
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "messages": [
+          {
+            "role": "system",
+            "content": "Ты полезный ассистент, который анализирует показатели МКС."
+          },
+          {
+            "role": "user",
+            "content": "Привет! Объясни показатели.\\n\\nДанные:\\n" +
+              JSON.stringify($('HTTP Request1').first().json, null, 2)
+          }
+        ]
+      }
+    }}'''
+    result = compile_expression(expression, node="HTTP Request2", parameter="jsonBody")
+    assert result.dependencies == {"HTTP Request1"}
+
+    namespace = {"json": json}
+    exec("def body(results):\n    return " + result.code, namespace)
+    body = namespace["body"]({"HTTP Request1": [{"json": {
+        "latitude": 45.0,
+        "longitude": -72.5,
+        "name": "МКС",
+    }}]})
+
+    assert body["model"] == "deepseek/deepseek-v4.1-flash-1017"
+    assert body["messages"][0]["role"] == "system"
+    assert body["messages"][1]["content"].endswith(
+        '{\n  "latitude": 45.0,\n  "longitude": -72.5,\n  "name": "МКС"\n}'
+    )
+
+
 def test_strict_boolean_expression_distinguishes_numbers_and_strings():
     result = compile_expression("={{ $json.check === true }}", node="IF", parameter="condition")
     namespace = {}

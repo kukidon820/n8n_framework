@@ -56,6 +56,38 @@ def _split_top_level(value: str, delimiter: str) -> list[str]:
     return parts
 
 
+def _json_stringify(value: str) -> Expression:
+    """Скомпилировать JSON.stringify с обычным значением и безопасными настройками отступа."""
+    arguments = _split_top_level(value[len("JSON.stringify("):-1], ",")
+    if not 1 <= len(arguments) <= 3 or not arguments[0].strip():
+        raise ValueError("JSON.stringify должен содержать значение и не более двух дополнительных аргументов")
+    if len(arguments) > 1 and arguments[1].strip() != "null":
+        raise ValueError("в JSON.stringify поддерживается только null в параметре replacer")
+
+    inner = _expression(arguments[0])
+    indent: int | str | None = None
+    if len(arguments) == 3:
+        space = arguments[2].strip()
+        if re.fullmatch(r"\d+", space):
+            indent = min(int(space), 10) or None
+        elif space.startswith(("'", '"')):
+            try:
+                spacing = ast.literal_eval(space)
+            except (SyntaxError, ValueError) as exc:
+                raise ValueError("некорректный параметр отступа JSON.stringify") from exc
+            if not isinstance(spacing, str):
+                raise ValueError("отступ JSON.stringify должен быть числом или строкой")
+            indent = spacing[:10] or None
+        else:
+            raise ValueError("отступ JSON.stringify должен быть числом или строкой")
+
+    if indent is None:
+        code = f"json.dumps({inner.code}, ensure_ascii=False, separators=(',', ':'))"
+    else:
+        code = f"json.dumps({inner.code}, ensure_ascii=False, indent={indent!r})"
+    return Expression(code, inner.dependencies)
+
+
 def _expression(value: str) -> Expression:
     """Преобразовать поддерживаемое подмножество JavaScript-выражений."""
     value = value.strip()
@@ -167,8 +199,7 @@ def _expression(value: str) -> Expression:
         inner = _expression(value[1:])
         return Expression(f"(lambda v: v is None or v is False or v == 0 or v == '')({inner.code})", inner.dependencies)
     if value.startswith("JSON.stringify(") and value.endswith(")"):
-        inner = _expression(value[len("JSON.stringify("):-1])
-        return Expression(f"json.dumps({inner.code}, ensure_ascii=False, separators=(',', ':'))", inner.dependencies)
+        return _json_stringify(value)
     if value.startswith("[") and value.endswith("]"):
         inside = value[1:-1].strip()
         parts = [_expression(part) for part in _split_top_level(inside, ",")] if inside else []
@@ -184,10 +215,24 @@ def _expression(value: str) -> Expression:
         inside = value[1:-1].strip()
         for field in _split_top_level(inside, ",") if inside else []:
             pair = _split_top_level(field, ":")
-            if len(pair) != 2 or not re.fullmatch(r"[A-Za-z_$][\w$]*", pair[0].strip()):
+            if len(pair) != 2:
                 raise ValueError("неподдерживаемое поле объекта")
+            raw_key = pair[0].strip()
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", raw_key):
+                key = raw_key
+            elif re.fullmatch(r"\d+", raw_key):
+                key = raw_key
+            elif raw_key.startswith(("'", '"')):
+                try:
+                    key = ast.literal_eval(raw_key)
+                except (SyntaxError, ValueError) as exc:
+                    raise ValueError("некорректное имя поля объекта") from exc
+                if not isinstance(key, str):
+                    raise ValueError("имя поля объекта должно быть строкой")
+            else:
+                raise ValueError("неподдерживаемое имя поля объекта")
             item = _expression(pair[1])
-            entries.append(f"{pair[0].strip()!r}: {item.code}")
+            entries.append(f"{key!r}: {item.code}")
             dependencies.update(item.dependencies)
         return Expression("{" + ", ".join(entries) + "}", frozenset(dependencies))
     if value.startswith(("'", '"')):
