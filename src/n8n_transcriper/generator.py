@@ -20,10 +20,153 @@ from n8n_transcriper.converters.http import (
 )
 from n8n_transcriper.converters.merge import generate_merge_node
 from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgres_node
-from n8n_transcriper.converters.smtp import generate_smtp_node, is_gmail_send_node
+from n8n_transcriper.converters.smtp import (
+    generate_email_send_node,
+    generate_smtp_node,
+    is_gmail_send_node,
+)
 from n8n_transcriper.graph import connections, execution_order
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
+
+
+SUPPORTED_NODE_TYPES = {
+    "n8n-nodes-base.code",
+    "n8n-nodes-base.convertToFile",
+    "n8n-nodes-base.compression",
+    "n8n-nodes-base.extractFromFile",
+    "n8n-nodes-base.httpRequest",
+    "n8n-nodes-base.emailSend",
+    "n8n-nodes-base.set",
+    "n8n-nodes-base.postgres",
+    "n8n-nodes-base.merge",
+    "@n8n/n8n-nodes-langchain.agent",
+    "n8n-nodes-base.if",
+    "n8n-nodes-base.switch",
+}
+
+
+def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
+    """Проверить узлы независимо друг от друга и собрать их ошибки конвертации."""
+    if not isinstance(workflow, dict):
+        return []
+
+    connections_data = workflow.get("connections", {})
+    model_nodes: set[str] = set()
+    agent_models: dict[str, str] = {}
+    if isinstance(connections_data, dict):
+        for source, channels in connections_data.items():
+            if not isinstance(channels, dict):
+                continue
+            model_outputs = channels.get("ai_languageModel")
+            if not isinstance(model_outputs, list):
+                continue
+            for output in model_outputs:
+                if not isinstance(output, list):
+                    continue
+                for target in output:
+                    if isinstance(target, dict) and isinstance(target.get("node"), str):
+                        model_nodes.add(source)
+                        agent_models[target["node"]] = source
+
+    issues: list[tuple[str | None, str]] = []
+    nodes = workflow.get("nodes", [])
+    if not isinstance(nodes, list):
+        return issues
+
+    nodes_by_name = {
+        node["name"]: node
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("name"), str)
+    }
+
+    email_smtp_credentials: dict[str, str] = {}
+    for index, node in enumerate(nodes, start=1):
+        if not isinstance(node, dict):
+            continue
+        kind = node.get("type")
+        name = node.get("name") if isinstance(node.get("name"), str) else None
+        label = f"Узел {name}" if name else f"Узел №{index}"
+        if not isinstance(kind, str) or not isinstance(node.get("parameters"), dict):
+            continue
+
+        for setting in ("disabled", "continueOnFail"):
+            if node.get(setting, False) is not False:
+                issues.append((name, f"{label}: настройка {setting} не поддерживается."))
+        for setting in ("alwaysOutputData", "executeOnce"):
+            value = node.get(setting, False)
+            if not isinstance(value, bool):
+                issues.append((name, f"{label}: настройка {setting} должна быть логическим значением."))
+            elif value and kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge"}:
+                issues.append((name, f"{label}: настройка {setting} для этого типа узла не поддерживается."))
+        if node.get("onError", "stopWorkflow") != "stopWorkflow":
+            issues.append((name, f"{label}: настройка onError не поддерживается."))
+        if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
+            issues.append((name, f"{label}: настройка retryOnFail не поддерживается."))
+
+        trigger_name = kind.rsplit(".", 1)[-1].lower()
+        if trigger_name.endswith("trigger") or kind == "n8n-nodes-base.webhook":
+            if index != 1:
+                issues.append((name, f"{label}: узел запуска должен стоять первым."))
+            continue
+        if name in model_nodes:
+            continue
+        if kind not in SUPPORTED_NODE_TYPES:
+            issues.append((name, f"{label}: неподдерживаемый тип {kind}"))
+            continue
+
+        try:
+            if kind == "n8n-nodes-base.code":
+                generate_code_node(node, "run_node")
+            elif kind in {
+                "n8n-nodes-base.convertToFile",
+                "n8n-nodes-base.compression",
+                "n8n-nodes-base.extractFromFile",
+            }:
+                generate_file_node(node, "run_node")
+            elif kind == "n8n-nodes-base.httpRequest":
+                if is_gmail_send_node(node):
+                    generate_smtp_node(node, "run_node")
+                else:
+                    generate_http_node(node, "run_node")
+                    http_credential_fields(node)
+                    http_secret_header_fields(node)
+            elif kind == "n8n-nodes-base.emailSend":
+                generate_email_send_node(node, "run_node")
+                credentials = node.get("credentials", {})
+                credential = credentials.get("smtp", {}) if isinstance(credentials, dict) else {}
+                if isinstance(credential, dict):
+                    credential_reference = credential.get("id") or credential.get("name")
+                    if isinstance(credential_reference, str) and credential_reference:
+                        email_smtp_credentials[name or label] = credential_reference
+            elif kind == "n8n-nodes-base.set":
+                generate_edit_fields(node, "run_node")
+            elif kind == "n8n-nodes-base.postgres":
+                credentials = node.get("credentials", {})
+                credential = credentials.get("postgres", {}) if isinstance(credentials, dict) else {}
+                if not isinstance(credential, dict) or not credential.get("id"):
+                    issues.append((name, f"{label}: не указаны credentials PostgreSQL."))
+                generate_postgres_node(node, "run_node")
+            elif kind == "n8n-nodes-base.merge":
+                generate_merge_node(node, "run_node")
+            elif kind == "@n8n/n8n-nodes-langchain.agent":
+                model_name = agent_models.get(name)
+                model = nodes_by_name.get(model_name) if model_name else None
+                if model is None:
+                    issues.append((name, f"{label}: не подключена chat-модель через ai_languageModel."))
+                else:
+                    generate_ai_agent(node, model, "run_node", "VALIDATION_MODEL")
+            elif kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
+                generate_condition_node(node, "run_node")
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, WorkflowError) else (
+                f"{label}: не удалось проверить узел ({type(exc).__name__})."
+            )
+            issues.append((name, message))
+    if len(set(email_smtp_credentials.values())) > 1:
+        for name in email_smtp_credentials:
+            issues.append((name, f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются."))
+    return issues
 
 
 def _linked_item_nodes(value: Any) -> set[str]:
@@ -78,7 +221,7 @@ def _project_toml(dependencies: set[str]) -> str:
     )
 
 
-def generate_project(workflow: dict[str, Any], output: Path) -> None:
+def generate_project(workflow: dict[str, Any], output: Path | None = None) -> dict[str, str]:
     """Сгенерировать исполняемый Python-проект из проверенного workflow.
 
     Все expressions разрешаются здесь, а не при запуске результата. Если
@@ -139,6 +282,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
     ai_model_configs: dict[str, dict[str, Any]] = {}
     uses_gmail = False
     uses_smtp = False
+    uses_email_send = False
+    email_smtp_credential = None
     http_credentials: set[str] = set()
     http_credential_descriptions: dict[str, set[str]] = {}
     postgres_credential = None
@@ -215,6 +360,24 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
                         references.update(compile_expression(value, node=name, parameter=parameter).dependencies)
                 dependencies.add("httpx>=0.27")
                 uses_gmail |= params.get("nodeCredentialType") == "gmailOAuth2"
+            missing = references - (completed & ancestors[name] if branching else completed)
+            if missing:
+                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+            arguments = "items, results, execution"
+        elif kind == "n8n-nodes-base.emailSend":
+            folder = "email_senders"
+            source, references = generate_email_send_node(node, function)
+            credentials = node.get("credentials", {})
+            credential = credentials.get("smtp", {}) if isinstance(credentials, dict) else {}
+            credential_reference = (
+                credential.get("id") or credential.get("name")
+                if isinstance(credential, dict)
+                else None
+            )
+            if email_smtp_credential is not None and credential_reference != email_smtp_credential:
+                raise WorkflowError(f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются")
+            email_smtp_credential = credential_reference
+            uses_email_send = True
             missing = references - (completed & ancestors[name] if branching else completed)
             if missing:
                 raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
@@ -460,15 +623,24 @@ def _clean_items(items):
                    'GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\n'
                    'GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")\n'
                    'GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")\n')
-    if uses_smtp:
-        config += ('\n# SMTP Gmail: используйте полный адрес и пароль приложения, не пароль аккаунта.\n'
-                   'SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")\n'
-                   'SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))\n'
-                   'SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")\n'
-                   'SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD", "")\n'
-                   'SMTP_FROM = os.getenv("SMTP_FROM", "")\n'
-                   'SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}\n'
-                   'SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "true").lower() in {"1", "true", "yes"}\n')
+    if uses_smtp or uses_email_send:
+        smtp_comment = (
+            "SMTP Gmail: используйте полный адрес и пароль приложения, не пароль аккаунта."
+            if uses_smtp
+            else "SMTP credentials из n8n не экспортируются; заполните параметры подключения здесь."
+        )
+        smtp_host = "smtp.gmail.com" if uses_smtp else ""
+        config += (
+            f"\n# {smtp_comment}\n"
+            f'SMTP_HOST = os.getenv("SMTP_HOST", {json.dumps(smtp_host)})\n'
+            'SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))\n'
+            'SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")\n'
+            'SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD", "")\n'
+            'SMTP_FROM = os.getenv("SMTP_FROM", "")\n'
+            'SMTP_HOSTNAME = os.getenv("SMTP_HOSTNAME", "")\n'
+            'SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}\n'
+            'SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "true").lower() in {"1", "true", "yes"}\n'
+        )
     for key in sorted(http_credentials):
         for description in sorted(http_credential_descriptions.get(key, set())):
             config += f'\n# {description}.\n'
@@ -490,8 +662,10 @@ def _clean_items(items):
             required.append(f"{prefix}_API_URL")
     if uses_gmail:
         required.extend(["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"])
-    if uses_smtp:
+    if uses_smtp or uses_email_send:
         required.extend(["SMTP_USERNAME", "SMTP_APP_PASSWORD"])
+    if uses_email_send and not uses_smtp:
+        required.append("SMTP_HOST")
     required.extend(sorted(http_credentials))
     if postgres_credential is not None:
         required.extend(["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"])
@@ -511,6 +685,10 @@ def _clean_items(items):
            if ai_model_configs else '')
         + ('Отправка через Gmail настроена по SMTP: `smtp.gmail.com:587` с STARTTLS. Укажите `SMTP_USERNAME` (полный адрес) и `SMTP_APP_PASSWORD` (пароль приложения), не обычный пароль аккаунта. Пароль приложения создаётся в Google Account: https://myaccount.google.com/apppasswords; для этого должна быть включена двухэтапная аутентификация.\n\n'
            if uses_smtp else '')
+        + ('Узел n8n Send Email использует параметры `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME` и `SMTP_APP_PASSWORD` из `config.py` или окружения. Значения SMTP credentials не экспортируются из workflow; заполните их вручную. Для Gmail используйте `smtp.gmail.com:587`, STARTTLS и пароль приложения. Для SSL на порту 465 включите `SMTP_USE_SSL` и выключите `SMTP_STARTTLS`.\n\n'
+           if uses_email_send and not uses_smtp else '')
+        + ('Узлы Send Email и отправитель Gmail API используют общие параметры SMTP из `config.py`.\n\n'
+           if uses_email_send and uses_smtp else '')
         +
         'PowerShell: `$env:ИМЯ_ПЕРЕМЕННОЙ = "значение"`. Linux/macOS: `export ИМЯ_ПЕРЕМЕННОЙ="значение"`.\n\n'
         '## Запуск\n\n'
@@ -521,6 +699,9 @@ def _clean_items(items):
     files["conversion_report.md"] = (f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. '
         f'Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n\n'
         f'Настройки авторизации: {credentials}.\n')
+    if output is None:
+        return files
+
     output = Path(output)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise WorkflowError(f"Каталог назначения не пуст: {output}")
@@ -528,3 +709,4 @@ def _clean_items(items):
         target = output / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+    return files
