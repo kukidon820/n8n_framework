@@ -83,8 +83,48 @@ def test_validate_reports_all_unsupported_nodes_and_continues(tmp_path):
     workflow = tmp_path / "workflow.json"
     nodes = [
         {"id": "trigger", "name": "Start", "type": "n8n-nodes-base.manualTrigger", "parameters": {}},
-        {"id": "mail-1", "name": "Send an Email", "type": "n8n-nodes-base.emailSend", "parameters": {}},
-        {"id": "mail-2", "name": "Send an Email1", "type": "n8n-nodes-base.emailSend", "parameters": {}},
+        {"id": "mail-1", "name": "Mail provider 1", "type": "custom.mailProvider", "parameters": {}},
+        {"id": "mail-2", "name": "Mail provider 2", "type": "custom.mailProvider", "parameters": {}},
+    ]
+    workflow.write_text(json.dumps({
+        "nodes": nodes,
+        "connections": {
+            "Start": {"main": [[{"node": "Mail provider 1", "type": "main", "index": 0}]]},
+            "Mail provider 1": {"main": [[{"node": "Mail provider 2", "type": "main", "index": 0}]]},
+        },
+    }), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate", str(workflow)])
+
+    assert result.exit_code == 1
+    assert "Обнаружено проблем: 2" in result.output
+    assert "Mail provider 1: неподдерживаемый тип custom.mailProvider" in result.output
+    assert "Mail provider 2: неподдерживаемый тип custom.mailProvider" in result.output
+
+
+def test_validate_supports_two_email_send_nodes_with_shared_smtp_credentials(tmp_path):
+    workflow = tmp_path / "workflow.json"
+    credential = {"smtp": {"id": "smtp-account", "name": "SMTP account"}}
+    nodes = [
+        {"id": "trigger", "name": "Start", "type": "n8n-nodes-base.manualTrigger", "parameters": {}},
+        {
+            "id": "email-1", "name": "Send an Email", "type": "n8n-nodes-base.emailSend",
+            "typeVersion": 2.1,
+            "parameters": {
+                "fromEmail": "sender@example.com", "toEmail": "first@example.com",
+                "subject": "First", "emailFormat": "text", "text": "First message", "options": {},
+            },
+            "credentials": credential,
+        },
+        {
+            "id": "email-2", "name": "Send an Email1", "type": "n8n-nodes-base.emailSend",
+            "typeVersion": 2.1,
+            "parameters": {
+                "fromEmail": "sender@example.com", "toEmail": "second@example.com",
+                "subject": "Second", "emailFormat": "text", "text": "Second message", "options": {},
+            },
+            "credentials": credential,
+        },
     ]
     workflow.write_text(json.dumps({
         "nodes": nodes,
@@ -96,10 +136,9 @@ def test_validate_reports_all_unsupported_nodes_and_continues(tmp_path):
 
     result = CliRunner().invoke(app, ["validate", str(workflow)])
 
-    assert result.exit_code == 1
-    assert "Обнаружено проблем: 2" in result.output
-    assert "Send an Email: неподдерживаемый тип n8n-nodes-base.emailSend" in result.output
-    assert "Send an Email1: неподдерживаемый тип n8n-nodes-base.emailSend" in result.output
+    assert result.exit_code == 0, result.output
+    assert "Проверка workflow пройдена" in result.output
+    assert "Синтаксис сгенерированного Python проверен" in result.output
 
 
 def test_validate_reports_structure_and_node_errors_together(tmp_path):
