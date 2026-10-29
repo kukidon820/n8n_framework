@@ -13,7 +13,11 @@ from n8n_transcriper.converters.ai import generate_ai_agent
 from n8n_transcriper.converters.conditions import generate_condition_node
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import generate_file_node
-from n8n_transcriper.converters.http import generate_http_node, http_credential_fields
+from n8n_transcriper.converters.http import (
+    generate_http_node,
+    http_credential_fields,
+    http_secret_header_fields,
+)
 from n8n_transcriper.converters.merge import generate_merge_node
 from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgres_node
 from n8n_transcriper.converters.smtp import generate_smtp_node, is_gmail_send_node
@@ -183,6 +187,8 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
                 source = generate_http_node(node, function)
                 credential_fields = http_credential_fields(node)
                 http_credentials.update(credential_fields.values())
+                secret_header_fields = http_secret_header_fields(node)
+                http_credentials.update(secret_header_fields.values())
                 credential_type = params.get("genericAuthType", "HTTP")
                 credentials = node.get("credentials", {})
                 credential = credentials.get(credential_type, {}) if isinstance(credentials, dict) else {}
@@ -194,6 +200,11 @@ def generate_project(workflow: dict[str, Any], output: Path) -> None:
                 }
                 for field, key in credential_fields.items():
                     description = f"HTTP-узел «{name}», credential «{credential_label}»: {field_labels[field]}"
+                    http_credential_descriptions.setdefault(key, set()).add(description)
+                header_parameters = params.get("headerParameters", {}).get("parameters", [])
+                for index, key in secret_header_fields.items():
+                    header_name = header_parameters[index]["name"]
+                    description = f"HTTP-узел «{name}»: значение секретного заголовка «{header_name}»"
                     http_credential_descriptions.setdefault(key, set()).add(description)
                 values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody")), ("body", params.get("body"))]
                 for key in ("headerParameters", "queryParameters", "bodyParameters"):

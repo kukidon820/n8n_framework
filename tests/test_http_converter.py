@@ -3,7 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from n8n_transcriper.converters.http import generate_http_node, http_credential_fields
+from n8n_transcriper.converters.http import (
+    generate_http_node,
+    http_credential_fields,
+    http_secret_header_fields,
+)
 from n8n_transcriper.reader import WorkflowError
 from n8n_transcriper.generator import generate_project
 
@@ -249,6 +253,96 @@ def test_generated_config_contains_only_placeholders(tmp_path):
     config = (output / "config.py").read_text(encoding="utf-8")
     assert f'{field} = os.getenv(' in config
     assert field in (output / "README.md").read_text(encoding="utf-8")
+
+
+def test_static_secret_headers_without_credentials_use_config(tmp_path, monkeypatch):
+    secret = "Bearer sample-secret-value"
+    node = {
+        "id": "http-node-with-headers",
+        "name": "HTTP Request2",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.2,
+        "parameters": {
+            "url": "https://example.com",
+            "sendHeaders": True,
+            "headerParameters": {"parameters": [
+                {"name": "Authorization", "value": secret},
+                {"name": "Content-Type", "value": "application/json"},
+            ]},
+        },
+    }
+    fields = http_secret_header_fields(node)
+    field = fields[0]
+    source = generate_http_node(node, "request")
+    assert secret not in source
+    assert f"config.{field}" in source
+    assert "'Content-Type': 'application/json'" in source
+
+    output = tmp_path / "generated"
+    generate_project({"nodes": [node], "connections": {}}, output)
+    config = (output / "config.py").read_text(encoding="utf-8")
+    generated_node = next((output / "http_requests").glob("*.py")).read_text(encoding="utf-8")
+    assert secret not in config
+    assert secret not in generated_node
+    assert f'{field} = os.getenv({field!r}, "")' in config
+    assert field in (output / "README.md").read_text(encoding="utf-8")
+
+    captured = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def request(self, method, url, **kwargs):
+            captured.append(kwargs["headers"])
+            return SimpleNamespace(raise_for_status=lambda: None, headers={"content-type": "application/json"},
+                                   content=b"{}", json=lambda: {})
+
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{field: secret}))
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=Exception))
+    namespace = {}
+    exec(source, namespace)
+    namespace["request"]([{"json": {}}], {}, {})
+    assert captured == [{"authorization": secret, "content-type": "application/json"}]
+
+
+def test_custom_secret_header_is_removed_on_cross_origin_redirect(monkeypatch):
+    import httpx
+
+    requests = []
+    real_client = httpx.Client
+
+    def handle(request):
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(302, headers={"Location": "https://other.example/path"})
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    node = {
+        "id": "custom-auth-header",
+        "name": "HTTP Request2",
+        "typeVersion": 4.2,
+        "parameters": {
+            "url": "https://example.com",
+            "sendHeaders": True,
+            "headerParameters": {"parameters": [
+                {"name": "Authorization", "value": "Bearer sample-secret-value"},
+            ]},
+        },
+    }
+    field = http_secret_header_fields(node)[0]
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{field: "Bearer sample-secret-value"}))
+    namespace = {}
+    exec(generate_http_node(node, "request"), namespace)
+    namespace["request"]([{"json": {}}], {}, {})
+
+    assert requests[0].headers["authorization"] == "Bearer sample-secret-value"
+    assert "authorization" not in requests[1].headers
 
 
 @pytest.mark.parametrize("body_parameters,expected", [
