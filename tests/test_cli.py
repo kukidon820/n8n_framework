@@ -74,9 +74,53 @@ def test_validate_reports_node_and_stage_for_unsupported_node(tmp_path):
 
     assert result.exit_code == 1
     assert "Проверка workflow не пройдена" in result.output
-    assert "Этап: проверка поддержки узлов" in result.output
+    assert "Обнаружено проблем: 1" in result.output
+    assert "[проверка узлов и настроек]" in result.output
     assert "Unsupported node" in result.output
-    assert "WorkflowError" in result.output
+
+
+def test_validate_reports_all_unsupported_nodes_and_continues(tmp_path):
+    workflow = tmp_path / "workflow.json"
+    nodes = [
+        {"id": "trigger", "name": "Start", "type": "n8n-nodes-base.manualTrigger", "parameters": {}},
+        {"id": "mail-1", "name": "Send an Email", "type": "n8n-nodes-base.emailSend", "parameters": {}},
+        {"id": "mail-2", "name": "Send an Email1", "type": "n8n-nodes-base.emailSend", "parameters": {}},
+    ]
+    workflow.write_text(json.dumps({
+        "nodes": nodes,
+        "connections": {
+            "Start": {"main": [[{"node": "Send an Email", "type": "main", "index": 0}]]},
+            "Send an Email": {"main": [[{"node": "Send an Email1", "type": "main", "index": 0}]]},
+        },
+    }), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate", str(workflow)])
+
+    assert result.exit_code == 1
+    assert "Обнаружено проблем: 2" in result.output
+    assert "Send an Email: неподдерживаемый тип n8n-nodes-base.emailSend" in result.output
+    assert "Send an Email1: неподдерживаемый тип n8n-nodes-base.emailSend" in result.output
+
+
+def test_validate_reports_structure_and_node_errors_together(tmp_path):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(json.dumps({
+        "nodes": [None, {
+            "id": "unknown", "name": "Unsupported node",
+            "type": "custom.unknown", "parameters": {},
+        }],
+        "connections": {
+            "unknown-source": {"main": [[{"node": "missing-target", "type": "main", "index": 0}]]},
+        },
+    }), encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["validate", str(workflow)])
+
+    assert result.exit_code == 1
+    assert "Узел №1 должен быть объектом" in result.output
+    assert "Unsupported node: неподдерживаемый тип custom.unknown" in result.output
+    assert "Не найден исходный узел соединения" in result.output
+    assert "целевой узел «missing-target» не найден" in result.output
 
 
 def test_validate_reports_json_parse_location(tmp_path):
@@ -86,5 +130,5 @@ def test_validate_reports_json_parse_location(tmp_path):
     result = CliRunner().invoke(app, ["validate", str(workflow)])
 
     assert result.exit_code == 1
-    assert "Этап: чтение JSON" in result.output
-    assert "line 1 column" in result.output
+    assert "Файл:" in result.output
+    assert "строка 1, столбец" in result.output

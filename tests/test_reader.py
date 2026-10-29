@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
-from n8n_transcriper.reader import WorkflowError, read_workflow, validate_workflow
+from n8n_transcriper.reader import (
+    WorkflowError,
+    read_workflow,
+    validate_workflow,
+    validate_workflow_issues,
+)
 
 
 def test_reads_workflow_without_losing_data(tmp_path):
@@ -50,5 +55,32 @@ def test_invalid_structure(data):
 
 def test_invalid_json():
     with patch.object(Path, "open", return_value=io.StringIO("{")):
-        with pytest.raises(WorkflowError, match="Cannot read workflow"):
+        with pytest.raises(WorkflowError, match="строка 1, столбец 2"):
             read_workflow("bad.json")
+
+
+def test_collects_multiple_structure_errors_in_one_pass():
+    data = {
+        "nodes": [
+            None,
+            {"id": "", "name": "", "type": "", "parameters": []},
+            {"id": "", "name": "Existing", "type": "custom.node", "parameters": {}},
+        ],
+        "connections": {
+            "missing-source": {
+                "main": [[
+                    {"node": "missing-target", "type": "", "index": -1},
+                    None,
+                ]],
+            },
+        },
+    }
+
+    issues = validate_workflow_issues(data)
+
+    assert len(issues) >= 8
+    assert any("Узел №1" in issue for issue in issues)
+    assert any("не найден" in issue for issue in issues)
+    with pytest.raises(WorkflowError) as error:
+        validate_workflow(data)
+    assert str(error.value).count("\n-") == len(issues)
