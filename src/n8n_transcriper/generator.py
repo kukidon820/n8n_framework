@@ -599,9 +599,20 @@ def _clean_items(items):
         item.pop("__transcriper_sources", None)
     return items
 ''') if linked_items else ""
-    files["main.py"] = ('"""Точка ручного запуска сгенерированного workflow."""\n\nimport logging\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
+    files["main.py"] = ('"""Точка ручного запуска сгенерированного workflow."""\n\nimport logging\nimport sys\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
         '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    """Выполнить workflow; input_data — список n8n items."""\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
-        '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")\n    run()\n')
+        '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)\n    run()\n')
+    files["run.bat"] = (
+        "@echo off\r\n"
+        "setlocal\r\n"
+        'cd /d "%~dp0"\r\n'
+        "uv run python main.py\r\n"
+        'set "workflow_exit_code=%ERRORLEVEL%"\r\n'
+        'if not "%workflow_exit_code%"=="0" echo Workflow failed with exit code %workflow_exit_code%.\r\n'
+        "echo.\r\n"
+        "pause\r\n"
+        "exit /b %workflow_exit_code%\r\n"
+    )
     config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
     for prefix, model_config in sorted(ai_model_configs.items()):
         api_url = model_config["api_url"]
@@ -692,7 +703,9 @@ def _clean_items(items):
         +
         'PowerShell: `$env:ИМЯ_ПЕРЕМЕННОЙ = "значение"`. Linux/macOS: `export ИМЯ_ПЕРЕМЕННОЙ="значение"`.\n\n'
         '## Запуск\n\n'
-        'Запустите workflow командой `uv run python main.py` на Windows, Linux и macOS.\n\n'
+        'Запустите workflow командой `uv run python main.py` на Windows, Linux и macOS. '
+        'В Windows также можно запустить `run.bat`: окно CMD будет ждать нажатия клавиши после выполнения, '
+        'чтобы можно было спокойно посмотреть логи.\n\n'
         '`main.py` можно импортировать из другого кода: `from main import run`; функция `run(input_data)` принимает список items вида `[{"json": {...}}]`.\n'
     )
     files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'
