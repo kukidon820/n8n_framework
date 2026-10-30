@@ -6,14 +6,14 @@
 
 ## Быстрый запуск
 
-Требуются Python 3.11+ и [uv](https://docs.astral.sh/uv/).
+Требуются Python 3.12+ и [uv](https://docs.astral.sh/uv/). Файл `.python-version` выбирает Python 3.12 для команд uv.
 
 ```bash
 uv sync
 uv run python convert.py workflow.json --out generated
 ```
 
-Каталог `generated` должен отсутствовать или быть пустым. В нём появятся `main.py`, `config.py`, `pyproject.toml`, `uv.lock`, `requirements.txt`, `README.md`, `conversion_report.md` и модули для используемых узлов. При конвертации uv разрешит зависимости и создаст lock-файл.
+Каталог `generated` должен отсутствовать или быть пустым. В нём появятся `main.py`, `config.py`, `pyproject.toml`, `.python-version`, `uv.lock`, `requirements.txt`, `run.bat`, `run.sh`, `README.md`, `conversion_report.md` и модули для используемых узлов. При конвертации uv разрешит зависимости и создаст lock-файл.
 
 ## Команды
 
@@ -52,6 +52,8 @@ cd generated
 uv sync --locked
 uv run python main.py
 ```
+
+Для запуска через обёртку используйте `run.bat` на Windows или `sh run.sh` на Linux/macOS. В интерактивном терминале оба скрипта ждут подтверждения после выполнения, чтобы оставить логи на экране. Логирование workflow работает через стандартный вывод на обеих платформах.
 
 Триггеры n8n не запускаются. Если workflow ожидает входные данные, передайте items вручную:
 

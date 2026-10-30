@@ -3,6 +3,7 @@
 import hashlib
 import json
 import keyword
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -19,13 +20,14 @@ from n8n_transcriper.converters.http import (
     http_secret_header_fields,
 )
 from n8n_transcriper.converters.merge import generate_merge_node
+from n8n_transcriper.converters.loop import LOOP_MODULE, generate_loop_node
 from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgres_node
 from n8n_transcriper.converters.smtp import (
     generate_email_send_node,
     generate_smtp_node,
     is_gmail_send_node,
 )
-from n8n_transcriper.graph import connections, execution_order
+from n8n_transcriper.graph import connections, execution_order, loop_feedback_edges
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
@@ -40,6 +42,7 @@ SUPPORTED_NODE_TYPES = {
     "n8n-nodes-base.set",
     "n8n-nodes-base.postgres",
     "n8n-nodes-base.merge",
+    "n8n-nodes-base.splitInBatches",
     "@n8n/n8n-nodes-langchain.agent",
     "n8n-nodes-base.if",
     "n8n-nodes-base.switch",
@@ -149,6 +152,8 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
                 generate_postgres_node(node, "run_node")
             elif kind == "n8n-nodes-base.merge":
                 generate_merge_node(node, "run_node")
+            elif kind == "n8n-nodes-base.splitInBatches":
+                generate_loop_node(node)
             elif kind == "@n8n/n8n-nodes-langchain.agent":
                 model_name = agent_models.get(name)
                 model = nodes_by_name.get(model_name) if model_name else None
@@ -214,11 +219,129 @@ def _project_toml(dependencies: set[str]) -> str:
         'name = "generated-workflow"\n'
         'version = "0.1.0"\n'
         'description = "Самостоятельный Python-проект, созданный из workflow n8n"\n'
-        'requires-python = ">=3.11"\n'
+        'requires-python = ">=3.12"\n'
         f"dependencies = {dependency_block}\n\n"
         "[tool.uv]\n"
         "package = false\n"
     )
+
+
+def _loop_layout(
+    nodes: dict[str, dict[str, Any]],
+    main_nodes: set[str],
+    main_edges: list[Any],
+    base_order: list[str],
+    feedback_edges: list[Any],
+) -> dict[str, Any] | None:
+    """Проверить граф одного Loop и разложить его на вход, тело и done-ветвь."""
+    loop_names = [
+        name for name in main_nodes
+        if nodes[name]["type"] == "n8n-nodes-base.splitInBatches"
+    ]
+    if not loop_names:
+        if feedback_edges:
+            raise WorkflowError("Обнаружена обратная связь без узла Loop Over Items")
+        return None
+    if len(loop_names) != 1:
+        raise WorkflowError("Пока поддерживается один узел Loop Over Items в workflow")
+
+    name = loop_names[0]
+    settings = generate_loop_node(nodes[name])
+    feedback = [edge for edge in feedback_edges if edge.target == name]
+    if len(feedback) != 1 or feedback[0].input != 0 or feedback[0].output != 0:
+        raise WorkflowError(
+            f"Узел {name}: требуется ровно одна обратная связь с выхода 0 на вход 0"
+        )
+    feedback_edge = feedback[0]
+    dag_edges = [edge for edge in main_edges if edge not in feedback_edges]
+    loop_inputs = [edge for edge in dag_edges if edge.target == name]
+    if len(loop_inputs) != 1 or loop_inputs[0].input != 0:
+        raise WorkflowError(f"Узел {name}: требуется ровно один начальный вход")
+
+    outgoing: dict[str, list[Any]] = {}
+    incoming: dict[str, list[Any]] = {}
+    for edge in dag_edges:
+        outgoing.setdefault(edge.source, []).append(edge)
+        incoming.setdefault(edge.target, []).append(edge)
+
+    loop_edges = [edge for edge in dag_edges if edge.source == name and edge.output == settings.loop_output]
+    if not loop_edges:
+        raise WorkflowError(f"Узел {name}: выход loop не подключён")
+    done_edges = (
+        [edge for edge in dag_edges if edge.source == name and edge.output == settings.done_output]
+        if settings.done_output is not None
+        else []
+    )
+
+    def reachable(starts: list[Any]) -> set[str]:
+        visited: set[str] = set()
+        pending = [edge.target for edge in starts]
+        while pending:
+            current = pending.pop()
+            if current == name or current in visited:
+                continue
+            visited.add(current)
+            pending.extend(edge.target for edge in outgoing.get(current, []))
+        return visited
+
+    body_nodes = reachable(loop_edges)
+    done_nodes = reachable(done_edges)
+    overlap = body_nodes & done_nodes
+    if overlap:
+        raise WorkflowError(
+            f"Узел {name}: ветви loop и done пересекаются у узла {sorted(overlap)[0]}"
+        )
+
+    for edge in dag_edges:
+        if edge.target in body_nodes and edge.source not in body_nodes and not (
+            edge.source == name and edge.output == settings.loop_output
+        ):
+            raise WorkflowError(
+                f"Узел {edge.target}: вход в тело Loop должен идти из узла Loop или его тела"
+            )
+        if edge.target in done_nodes and edge.source not in done_nodes and not (
+            edge.source == name and edge.output == settings.done_output
+        ):
+            raise WorkflowError(
+                f"Узел {edge.target}: done-ветвь должна начинаться с выхода done узла {name}"
+            )
+
+    if feedback_edge.source not in body_nodes:
+        raise WorkflowError(f"Узел {name}: обратная связь должна идти из тела цикла")
+
+    before_nodes: set[str] = set()
+    pending = [edge.source for edge in loop_inputs]
+    while pending:
+        current = pending.pop()
+        if current == name or current in before_nodes:
+            continue
+        before_nodes.add(current)
+        pending.extend(edge.source for edge in incoming.get(current, []))
+
+    categorized = before_nodes | body_nodes | done_nodes | {name}
+    unplaced = main_nodes - categorized
+    if unplaced:
+        raise WorkflowError(
+            f"Узел {sorted(unplaced)[0]} не входит во вход, тело или done-ветвь Loop {name}"
+        )
+    if before_nodes & (body_nodes | done_nodes):
+        raise WorkflowError(f"Узел {name}: путь до цикла пересекается с его выходами")
+
+    order = (
+        [node for node in base_order if node in before_nodes]
+        + [name]
+        + [node for node in base_order if node in body_nodes]
+        + [node for node in base_order if node in done_nodes]
+    )
+    return {
+        "name": name,
+        "settings": settings,
+        "feedback": feedback_edge,
+        "body": body_nodes,
+        "done": done_nodes,
+        "order": order,
+        "dag_edges": dag_edges,
+    }
 
 
 def generate_project(workflow: dict[str, Any], output: Path | None = None) -> dict[str, str]:
@@ -242,24 +365,35 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     model_names = set(models.values())
     if len(model_names) != len(models):
         raise WorkflowError("Одна модель не может быть подключена к нескольким агентам")
-    main_edges = [edge for edge in edges if edge.channel == "main"]
-    if any(edge.target_type != "main" or edge.source in model_names or edge.target in model_names or (edge.input != 0 and nodes[edge.target]["type"] != "n8n-nodes-base.merge") for edge in main_edges):
+    all_main_edges = [edge for edge in edges if edge.channel == "main"]
+    if any(edge.target_type != "main" or edge.source in model_names or edge.target in model_names or (edge.input != 0 and nodes[edge.target]["type"] != "n8n-nodes-base.merge") for edge in all_main_edges):
         raise WorkflowError("Неподдерживаемые основные соединения")
     main_nodes = set(nodes) - model_names
+    feedback_edges = loop_feedback_edges(workflow)
+    main_edges = [edge for edge in all_main_edges if edge not in feedback_edges]
+    base_order = [name for name in execution_order(workflow) if name not in model_names]
+    loop_info = _loop_layout(nodes, main_nodes, all_main_edges, base_order, feedback_edges)
+    if loop_info:
+        main_edges = loop_info["dag_edges"]
     incoming = {name: 0 for name in main_nodes}
     outgoing = {name: 0 for name in main_nodes}
     for edge in main_edges:
         incoming[edge.target] += 1
+    for edge in all_main_edges:
         outgoing[edge.source] += 1
     if sum(v == 0 for v in incoming.values()) != 1:
         raise WorkflowError("Workflow должен иметь ровно одну начальную точку")
     for source in main_nodes:
         ports = [edge.output for edge in main_edges if edge.source == source]
-        if nodes[source]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"} and any(port != 0 for port in ports):
+        if nodes[source]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.splitInBatches"} and any(port != 0 for port in ports):
             raise WorkflowError(f"Узел {source}: неподдерживаемые выходы")
-    order = [name for name in execution_order(workflow) if name not in model_names]
+        if nodes[source]["type"] == "n8n-nodes-base.splitInBatches":
+            settings = generate_loop_node(nodes[source])
+            if any(port >= settings.output_count for port in ports):
+                raise WorkflowError(f"Узел {source}: соединение с несуществующим выходом")
+    order = loop_info["order"] if loop_info else base_order
     branching = any(
-        nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge"}
+        nodes[name]["type"] in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.merge", "n8n-nodes-base.splitInBatches"}
         or outgoing[name] > 1 or incoming[name] > 1
         for name in main_nodes
     )
@@ -275,6 +409,10 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     files: dict[str, str] = {}
     imports = []
     calls = []
+    loop_state_name = None
+    loop_body_call_start = None
+    loop_body_order = [name for name in order if loop_info and name in loop_info["body"]]
+    loop_body_nodes = loop_info["body"] if loop_info else set()
     converted = 0
     skipped = 0
     dependencies: set[str] = set()
@@ -411,6 +549,10 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             if [edge.input for edge in parents[name]] != list(range(input_count)):
                 raise WorkflowError(f"Узел {name}: Merge требует по одному соединению на каждый вход")
             arguments = "merge_inputs"
+        elif kind == "n8n-nodes-base.splitInBatches":
+            folder = "operations"
+            source = LOOP_MODULE
+            arguments = ""
         elif kind == "@n8n/n8n-nodes-langchain.agent":
             if name not in models:
                 raise WorkflowError(f"Узел {name}: не подключена chat-модель через ai_languageModel")
@@ -439,7 +581,35 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             raise WorkflowError(f"Узел {name}: неподдерживаемый тип {kind}")
         files[f"{folder}/{stem}.py"] = source
         files[f"{folder}/__init__.py"] = ""
-        imports.append(f"from {folder}.{stem} import {function} as {stem}")
+        if kind == "n8n-nodes-base.splitInBatches":
+            files.pop(f"{folder}/{stem}.py", None)
+            files["operations/loop.py"] = LOOP_MODULE
+            if "from operations.loop import Loop" not in imports:
+                imports.append("from operations.loop import Loop")
+            loop_state_name = f"loop_{stem}"
+            loop_settings = loop_info["settings"]
+            calls.append("    items = []")
+            for edge in parents[name]:
+                value = f"{aliases[edge.source]}[{edge.output}]"
+                fanout = sum(1 for item in main_edges if item.source == edge.source and item.output == edge.output) > 1
+                calls.append(f"    items.extend({'deepcopy(' + value + ')' if fanout else value})")
+            calls.extend([
+                f"    {loop_state_name} = Loop(batch_size={loop_settings.batch_size}, reset={loop_settings.reset!r})",
+                f"    {aliases[name]} = [[] for _ in range({loop_settings.output_count})]",
+                f"    for loop_batch in {loop_state_name}.iterate(items):",
+            ])
+            if linked_items:
+                calls.append(f"        {loop_state_name}.link_batch({name!r}, loop_batch)")
+            calls.extend([
+                f"        {aliases[name]}[{loop_settings.loop_output}] = loop_batch",
+                f"        results[{name!r}] = loop_batch",
+            ])
+            loop_body_call_start = len(calls)
+            converted += 1
+            completed.add(name)
+            continue
+        else:
+            imports.append(f"from {folder}.{stem} import {function} as {stem}")
         if branching:
             if kind == "n8n-nodes-base.merge":
                 values = [f'deepcopy({aliases[e.source]}[{e.output}])' for e in parents[name]]
@@ -469,6 +639,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                 if linked_items:
                     calls.extend([
                         f"        branch_outputs = {stem}({arguments})",
+                        f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r}, "
+                        f"len({loop_state_name}.results.get({name!r}, [])))" if name in loop_body_nodes else
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r})",
                     ])
                 else:
@@ -481,13 +653,32 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                     calls.extend(['        if not items:', '            items = [{"json": {}}]'])
                 if linked_items:
                     if kind == "n8n-nodes-base.merge":
-                        calls.append(f"        items = _link_merge(merge_inputs, items, {name!r})")
+                        calls.append(
+                            f"        items = _link_merge(merge_inputs, items, {name!r}, "
+                            f"len({loop_state_name}.results.get({name!r}, [])))"
+                            if name in loop_body_nodes else
+                            f"        items = _link_merge(merge_inputs, items, {name!r})"
+                        )
                     else:
-                        calls.append(f"        items = _link_lineage(source_items, items, {name!r})")
-                calls.extend([f"        {aliases[name]}[0] = items", f"        results[{name!r}] = items"])
+                        calls.append(
+                            f"        items = _link_lineage(source_items, items, {name!r}, "
+                            f"len({loop_state_name}.results.get({name!r}, [])))"
+                            if name in loop_body_nodes else
+                            f"        items = _link_lineage(source_items, items, {name!r})"
+                        )
+                stored_items = (
+                    f"{loop_state_name}.record_result({name!r}, items)"
+                    if name in loop_body_nodes else "items"
+                )
+                calls.extend([f"        {aliases[name]}[0] = items", f"        results[{name!r}] = {stored_items}"])
             calls.append(f"        logging.info({(name + ': completed')!r})")
             if is_condition:
-                calls.append(f"    results[{name!r}] = [item for output in {aliases[name]} for item in output]")
+                flattened = f"[item for output in {aliases[name]} for item in output]"
+                stored_outputs = (
+                    f"{loop_state_name}.record_result({name!r}, {flattened})"
+                    if name in loop_body_nodes else flattened
+                )
+                calls.append(f"    results[{name!r}] = {stored_outputs}")
         else:
             calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': started')!r})"])
             if node.get("executeOnce", False):
@@ -498,15 +689,48 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             if node.get("alwaysOutputData", False):
                 calls.extend(['    if not items:', '        items = [{"json": {}}]'])
             if linked_items:
-                calls.append(f"    items = _link_lineage(source_items, items, {name!r})")
-            calls.extend([f"    results[{name!r}] = items", f"    logging.info({(name + ': completed')!r})"])
+                calls.append(
+                    f"    items = _link_lineage(source_items, items, {name!r}, "
+                    f"len({loop_state_name}.results.get({name!r}, [])))"
+                    if name in loop_body_nodes else
+                    f"    items = _link_lineage(source_items, items, {name!r})"
+                )
+            stored_items = (
+                f"{loop_state_name}.record_result({name!r}, items)"
+                if name in loop_body_nodes else "items"
+            )
+            calls.extend([f"    results[{name!r}] = {stored_items}", f"    logging.info({(name + ': completed')!r})"])
         converted += 1
         completed.add(name)
+        if loop_info and name in loop_info["body"] and name == loop_body_order[-1]:
+            for call_index in range(loop_body_call_start, len(calls)):
+                calls[call_index] = "    " + calls[call_index]
+            feedback = loop_info["feedback"]
+            calls.append(
+                f"        {loop_state_name}.collect({aliases[feedback.source]}[{feedback.output}])"
+            )
+            loop_settings = loop_info["settings"]
+            if loop_settings.done_output is not None:
+                calls.append(
+                    f"    {aliases[loop_info['name']]}[{loop_settings.done_output}] = "
+                    f"deepcopy({loop_state_name}.done_items)"
+                )
+            calls.append(
+                f"    results[{loop_info['name']!r}] = {loop_state_name}.done_items"
+            )
     if not converted:
         raise WorkflowError("Workflow не содержит исполняемых поддерживаемых узлов")
     terminal = [name for name in order if outgoing[name] == 0 and nodes[name]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.manualTrigger"}]
-    return_code = ' + '.join(f'{aliases[name]}[0]' for name in terminal) or '[]' if branching else 'items'
-    lineage_helpers = ('LINKED_ITEM_NODES = ' + repr(tuple(sorted(linked_names))) + '\n\n\n' + '''def _link_lineage(source_items, output_items, node_name):
+    if loop_info:
+        terminal_values = [
+            f"{loop_state_name}.results.get({name!r}, [])" if name in loop_body_nodes
+            else f"{aliases[name]}[0]"
+            for name in terminal
+        ]
+        return_code = " + ".join(terminal_values) or f"{loop_state_name}.done_items"
+    else:
+        return_code = ' + '.join(f'{aliases[name]}[0]' for name in terminal) or '[]' if branching else 'items'
+    lineage_helpers = ('LINKED_ITEM_NODES = ' + repr(tuple(sorted(linked_names))) + '\n\n\n' + '''def _link_lineage(source_items, output_items, node_name, index_offset=0):
     """Перенести paired-item lineage через узел с выходными индексами."""
     for output_index, output_item in enumerate(output_items):
         paired = output_item.get("pairedItem")
@@ -525,12 +749,12 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
         if not isinstance(source_index, int) or isinstance(source_index, bool) or not 0 <= source_index < len(source_items):
             continue
         lineage = dict(source_items[source_index].get("_n8n_lineage", {}))
-        lineage[node_name] = output_index
+        lineage[node_name] = index_offset + output_index
         output_item["_n8n_lineage"] = lineage
     return output_items
 
 
-def _link_outputs(source_items, outputs, node_name):
+def _link_outputs(source_items, outputs, node_name, index_offset=0):
     """Сохранить связь исходных items с выходами IF или Switch."""
     by_identity = {id(item): index for index, item in enumerate(source_items)}
     linked_outputs = [[] for _ in outputs]
@@ -542,7 +766,7 @@ def _link_outputs(source_items, outputs, node_name):
                 continue
             output_item = deepcopy(item)
             lineage = dict(source_items[source_index].get("_n8n_lineage", {}))
-            lineage[node_name] = len(flattened)
+            lineage[node_name] = index_offset + len(flattened)
             output_item["_n8n_lineage"] = lineage
             linked_outputs[port].append(output_item)
             flattened.append(output_item)
@@ -558,7 +782,7 @@ def _tag_merge_inputs(inputs):
     return inputs
 
 
-def _link_merge(inputs, output_items, node_name):
+def _link_merge(inputs, output_items, node_name, index_offset=0):
     """Восстановить происхождение выходов Merge и проверить неоднозначность."""
     for output_index, item in enumerate(output_items):
         sources = item.pop("__transcriper_sources", None)
@@ -585,7 +809,7 @@ def _link_merge(inputs, output_items, node_name):
         ambiguous = sorted(conflicts.intersection(LINKED_ITEM_NODES))
         if ambiguous:
             raise ValueError(f"Ссылка .item на узел {ambiguous[0]} неоднозначна после Merge {node_name}")
-        lineage[node_name] = output_index
+        lineage[node_name] = index_offset + output_index
         item["_n8n_lineage"] = lineage
     return output_items
 
@@ -603,15 +827,28 @@ def _clean_items(items):
         '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    """Выполнить workflow; input_data — список n8n items."""\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)\n    run()\n')
     files["run.bat"] = (
-        "@echo off\r\n"
-        "setlocal\r\n"
-        'cd /d "%~dp0"\r\n'
-        "uv run python main.py\r\n"
-        'set "workflow_exit_code=%ERRORLEVEL%"\r\n'
-        'if not "%workflow_exit_code%"=="0" echo Workflow failed with exit code %workflow_exit_code%.\r\n'
-        "echo.\r\n"
-        "pause\r\n"
-        "exit /b %workflow_exit_code%\r\n"
+        "@echo off\n"
+        "setlocal\n"
+        'cd /d "%~dp0"\n'
+        "uv run python main.py\n"
+        'set "workflow_exit_code=%ERRORLEVEL%"\n'
+        'if not "%workflow_exit_code%"=="0" echo Workflow failed with exit code %workflow_exit_code%.\n'
+        "echo.\n"
+        "pause\n"
+        "exit /b %workflow_exit_code%\n"
+    )
+    files["run.sh"] = (
+        "#!/usr/bin/env sh\n"
+        "set -u\n"
+        'cd "$(dirname "$0")" || exit 1\n'
+        "uv run python main.py\n"
+        "workflow_exit_code=$?\n"
+        'if [ -t 0 ]; then\n'
+        '    printf "\\nWorkflow finished with exit code %s.\\n" "$workflow_exit_code"\n'
+        '    printf "Press Enter to close this terminal..."\n'
+        '    IFS= read -r _\n'
+        "fi\n"
+        'exit "$workflow_exit_code"\n'
     )
     config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
     for prefix, model_config in sorted(ai_model_configs.items()):
@@ -666,6 +903,7 @@ def _clean_items(items):
     files["config.py"] = config
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
     files["pyproject.toml"] = _project_toml(dependencies)
+    files[".python-version"] = "3.12\n"
     required = []
     for prefix, model_config in sorted(ai_model_configs.items()):
         required.append(f"{prefix}_API_KEY")
@@ -685,7 +923,8 @@ def _clean_items(items):
         '# Сгенерированный проект\n\n'
         'Проект запускает преобразованный workflow как обычную Python-программу. Исходный JSON для запуска не нужен.\n\n'
         '## Требования и установка\n\n'
-        'Нужен Python 3.11 или новее и установленный uv. Зависимости указаны в `pyproject.toml`, '
+        'Нужен Python 3.12 или новее и установленный uv. Файл `.python-version` выбирает Python 3.12 для команд uv. '
+        'Зависимости указаны в `pyproject.toml`, '
         'точные версии зафиксированы в `uv.lock`. В каталоге проекта выполните:\n\n'
         '```bash\nuv sync --locked\n```\n\n'
         '## Настройка credentials\n\n'
@@ -704,8 +943,8 @@ def _clean_items(items):
         'PowerShell: `$env:ИМЯ_ПЕРЕМЕННОЙ = "значение"`. Linux/macOS: `export ИМЯ_ПЕРЕМЕННОЙ="значение"`.\n\n'
         '## Запуск\n\n'
         'Запустите workflow командой `uv run python main.py` на Windows, Linux и macOS. '
-        'В Windows также можно запустить `run.bat`: окно CMD будет ждать нажатия клавиши после выполнения, '
-        'чтобы можно было спокойно посмотреть логи.\n\n'
+        'Помимо команды выше, используйте `run.bat` на Windows или `sh run.sh` на Linux/macOS. '
+        'В интерактивном терминале эти скрипты ждут подтверждения после выполнения, чтобы оставить логи на экране.\n\n'
         '`main.py` можно импортировать из другого кода: `from main import run`; функция `run(input_data)` принимает список items вида `[{"json": {...}}]`.\n'
     )
     files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'
@@ -721,5 +960,8 @@ def _clean_items(items):
     for path, content in files.items():
         target = output / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        newline = "\r\n" if path == "run.bat" else "" if path == "run.sh" else None
+        target.write_text(content, encoding="utf-8", newline=newline)
+        if path == "run.sh" and os.name != "nt":
+            target.chmod(target.stat().st_mode | 0o111)
     return files
