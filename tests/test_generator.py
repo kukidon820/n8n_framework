@@ -31,9 +31,10 @@ def test_generated_pyproject_declares_only_required_dependencies(tmp_path):
 
     project = tomllib.loads((output / "pyproject.toml").read_text(encoding="utf-8"))
     requirements = (output / "requirements.txt").read_text(encoding="utf-8").splitlines()
-    assert project["project"]["requires-python"] == ">=3.11"
+    assert project["project"]["requires-python"] == ">=3.12"
     assert project["project"]["dependencies"] == ["httpx>=0.27"]
     assert requirements == project["project"]["dependencies"]
+    assert (output / ".python-version").read_text(encoding="utf-8") == "3.12\n"
     assert project["tool"]["uv"]["package"] is False
 
 

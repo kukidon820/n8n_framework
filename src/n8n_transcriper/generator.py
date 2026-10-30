@@ -214,7 +214,7 @@ def _project_toml(dependencies: set[str]) -> str:
         'name = "generated-workflow"\n'
         'version = "0.1.0"\n'
         'description = "Самостоятельный Python-проект, созданный из workflow n8n"\n'
-        'requires-python = ">=3.11"\n'
+        'requires-python = ">=3.12"\n'
         f"dependencies = {dependency_block}\n\n"
         "[tool.uv]\n"
         "package = false\n"
@@ -666,6 +666,7 @@ def _clean_items(items):
     files["config.py"] = config
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
     files["pyproject.toml"] = _project_toml(dependencies)
+    files[".python-version"] = "3.12\n"
     required = []
     for prefix, model_config in sorted(ai_model_configs.items()):
         required.append(f"{prefix}_API_KEY")
@@ -685,7 +686,8 @@ def _clean_items(items):
         '# Сгенерированный проект\n\n'
         'Проект запускает преобразованный workflow как обычную Python-программу. Исходный JSON для запуска не нужен.\n\n'
         '## Требования и установка\n\n'
-        'Нужен Python 3.11 или новее и установленный uv. Зависимости указаны в `pyproject.toml`, '
+        'Нужен Python 3.12 или новее и установленный uv. Файл `.python-version` выбирает Python 3.12 для команд uv. '
+        'Зависимости указаны в `pyproject.toml`, '
         'точные версии зафиксированы в `uv.lock`. В каталоге проекта выполните:\n\n'
         '```bash\nuv sync --locked\n```\n\n'
         '## Настройка credentials\n\n'
