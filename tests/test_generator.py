@@ -57,6 +57,33 @@ def test_generate_and_run_linear_project(tmp_path):
     assert (output / "conversion_report.md").exists()
 
 
+def test_generated_main_writes_info_logs_to_stdout_and_includes_windows_launcher(tmp_path):
+    workflow = {"nodes": [{
+        "id": "1", "name": "Build", "type": "n8n-nodes-base.code",
+        "parameters": {"language": "pythonNative", "pythonCode": "return _items"},
+    }], "connections": {}}
+    output = tmp_path / "generated"
+    generate_project(workflow, output)
+
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8", "main.py"],
+        cwd=output,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "[INFO] Build: started" in result.stdout
+    assert "[INFO] Build: completed" in result.stdout
+    assert result.stderr == ""
+
+    launcher = (output / "run.bat").read_text(encoding="utf-8")
+    assert "uv run python main.py" in launcher
+    assert "pause" in launcher.lower()
+    assert "exit /b %workflow_exit_code%" in launcher
+
+
 def test_unsupported_example_fails_without_partial_output(tmp_path):
     output = tmp_path / "generated"
     workflow = {"nodes": [{
