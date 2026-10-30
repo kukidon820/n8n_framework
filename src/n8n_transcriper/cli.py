@@ -1,4 +1,8 @@
-"""Командная строка конвертера."""
+"""Typer CLI для просмотра, проверки и конвертации workflow n8n.
+
+Команды работают с JSON на диске, показывают диагностики на русском и создают
+независимый Python-проект только после успешной проверки совместимости.
+"""
 import copy
 import subprocess
 import sys
@@ -19,7 +23,14 @@ app = typer.Typer(help="Инструменты для преобразовани
 
 
 def _echo_terminal_safe(message: object, *, err: bool = False) -> None:
-    """Вывести текст, экранируя символы, отсутствующие в кодировке терминала."""
+    """Безопасно вывести диагностическое сообщение в текущую кодировку терминала.
+
+    Args:
+        message: Любое значение, которое нужно показать пользователю.
+        err: Если True, писать в stderr; иначе — в stdout.
+
+    Символы, которые терминал не умеет отображать, выводятся как escape-последовательности.
+    """
     stream = sys.stderr if err else sys.stdout
     encoding = getattr(stream, "encoding", None) or "utf-8"
     safe_message = str(message).encode(encoding, errors="backslashreplace").decode(encoding)
@@ -27,7 +38,14 @@ def _echo_terminal_safe(message: object, *, err: bool = False) -> None:
 
 
 def _create_uv_lock(project: Path) -> None:
-    """Разрешить зависимости созданного проекта и записать uv.lock."""
+    """Запустить ``uv lock`` в generated-проекте и проверить результат.
+
+    Args:
+        project: Корневая папка проекта с ``pyproject.toml``.
+
+    Raises:
+        WorkflowError: если uv отсутствует или разрешение зависимостей завершилось ошибкой.
+    """
     try:
         result = subprocess.run(
             ["uv", "lock"],
@@ -49,7 +67,11 @@ def _create_uv_lock(project: Path) -> None:
 
 
 def _node_name_for_error(message: str, nodes: list[dict]) -> str | None:
-    """Найти имя узла в стандартном сообщении об ошибке конвертера."""
+    """Определить узел, названный в начале диагностики генератора.
+
+    Имена проверяются от длинного к короткому, чтобы имя узла-префикса не
+    перехватило сообщение о другом узле с более длинным именем.
+    """
     names = [node.get("name") for node in nodes if isinstance(node, dict)]
     for name in sorted((name for name in names if isinstance(name, str)), key=len, reverse=True):
         if message.startswith(f"Узел {name}:") or message.startswith(f"Узел «{name}»:"):
@@ -58,7 +80,11 @@ def _node_name_for_error(message: str, nodes: list[dict]) -> str | None:
 
 
 def _make_validation_placeholder(node: dict) -> None:
-    """Подменить проблемный узел простым pass-through только для продолжения проверки."""
+    """Временно сделать копию узла pass-through для дальнейшего анализа графа.
+
+    Заглушка применяется только к глубокой копии workflow внутри ``validate``.
+    Исходный JSON и создаваемый пользователем проект не меняются.
+    """
     node["type"] = "n8n-nodes-base.code"
     node["parameters"] = {"language": "pythonNative", "pythonCode": "return _items"}
     node["disabled"] = False
@@ -73,11 +99,17 @@ def _validate_generated_project(
     workflow: dict,
     known_invalid_nodes: set[str],
 ) -> tuple[list[str], int]:
-    """Продолжать проверку генерации, временно пропуская каждый проблемный узел."""
+    """Проверить генерацию файлов, собирая ошибки нескольких узлов.
+
+    После ошибки узла функция временно заменяет его на pass-through в копии
+    workflow и повторяет генерацию. На выходе возвращаются найденные сообщения
+    и число Python-файлов, которые удалось синтаксически проверить.
+    """
     issues: list[str] = []
     invalid_nodes = set(known_invalid_nodes)
     nodes = workflow["nodes"]
 
+    # Каждая итерация исключает не более одного нового проблемного узла.
     for _ in range(len(nodes) + 1):
         candidate = copy.deepcopy(workflow)
         for node in candidate["nodes"]:
@@ -95,6 +127,7 @@ def _validate_generated_project(
             issues.append(f"Ошибка генерации проекта: {exc}")
             return issues, 0
 
+        # Проверяем код в памяти: validate не создаёт временный generated-каталог.
         python_files = sorted(
             (relative_path, source)
             for relative_path, source in files.items()
@@ -121,7 +154,7 @@ def _validate_generated_project(
 
 @app.callback()
 def main() -> None:
-    """Работа с workflow n8n."""
+    """Точка входа Typer; реальные действия выполняют зарегистрированные команды."""
 
 
 @app.command()
@@ -129,7 +162,12 @@ def convert(
     workflow: Path = typer.Argument(help="Путь к JSON-файлу workflow."),
     out: Path = typer.Option(..., "--out", help="Пустая папка для сгенерированного проекта."),
 ) -> None:
-    """Преобразовать поддерживаемый workflow в проект Python."""
+    """Проверить workflow, сгенерировать проект и зафиксировать его зависимости.
+
+    Аргументы:
+        workflow: Исходный JSON-файл n8n.
+        out: Пустая папка, куда записываются файлы проекта.
+    """
     try:
         generate_project(read_workflow(workflow), out)
         _create_uv_lock(out)
@@ -141,7 +179,10 @@ def convert(
 
 @app.command()
 def inspect(workflow: Path = typer.Argument(help="Путь к JSON-файлу workflow.")) -> None:
-    """Проверить файл и показать список узлов workflow."""
+    """Проверить JSON и вывести имя workflow и тип каждого узла.
+
+    Команда не генерирует проект и не интерпретирует параметры узлов.
+    """
     try:
         data = read_workflow(workflow)
     except WorkflowError as exc:
@@ -155,7 +196,12 @@ def inspect(workflow: Path = typer.Argument(help="Путь к JSON-файлу wo
 
 @app.command()
 def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу workflow.")) -> None:
-    """Подробно проверить workflow и совместимость с конвертером."""
+    """Собрать структурные, графовые и конверсионные ошибки workflow.
+
+    Проверка выполняется по этапам: чтение JSON, структура, параметры узлов,
+    связи и синтаксис сгенерированного Python. Ошибки одного этапа не скрывают
+    остальные проверки, которые можно безопасно продолжить.
+    """
     issues: list[tuple[str, str]] = []
     try:
         data = load_workflow(workflow)
@@ -165,6 +211,7 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
         _echo_terminal_safe(f"Подробности: {exc}", err=True)
         raise typer.Exit(1) from exc
 
+    # Сначала собираются независимые ошибки структуры и настроек каждого узла.
     structural_issues = validate_workflow_issues(data)
     issues.extend(("проверка структуры", issue) for issue in structural_issues)
     node_issues = node_conversion_issues(data)
@@ -172,6 +219,7 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
 
     edges = []
     graph_is_valid = False
+    # Граф нельзя строить, пока имена узлов или форма соединений не проверены.
     if not structural_issues:
         try:
             edges = connections(data)
@@ -181,6 +229,7 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
             issues.append(("проверка графа", str(exc)))
 
     python_file_count = 0
+    # Генерацию запускаем только для структурно корректного и ацикличного графа.
     if not structural_issues and graph_is_valid:
         try:
             generation_issues, python_file_count = _validate_generated_project(

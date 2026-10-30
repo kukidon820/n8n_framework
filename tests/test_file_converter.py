@@ -1,3 +1,8 @@
+"""Проверки генерации узлов для файлов и архивов.
+
+Convert to File, ZIP и Extract from File работают с реальными байтами в тестах.
+"""
+
 import base64
 from io import BytesIO
 from zipfile import ZipFile

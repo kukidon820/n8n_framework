@@ -1,4 +1,9 @@
-"""Генерация ограниченного безопасного SQL для PostgreSQL."""
+"""Генерация параметризованных запросов PostgreSQL.
+
+Модуль принимает ограниченный набор простых SELECT/INSERT/UPDATE/DELETE,
+переводит $1-плейсхолдеры в именованные параметры psycopg и задаёт границы
+транзакций согласно настройкам узла n8n.
+"""
 
 import re
 import textwrap
@@ -8,7 +13,7 @@ from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
 
-POSTGRES_MODULE = '''"""Подключение к PostgreSQL для сгенерированных узлов."""
+POSTGRES_MODULE = '''"""Общие настройки подключения к PostgreSQL generated-проекта."""
 
 import psycopg
 from psycopg.rows import dict_row
@@ -16,7 +21,11 @@ import config
 
 
 def connect(timeout):
-    """Открыть соединение с параметрами из config.py."""
+    """Открыть соединение psycopg с credentials из config.py.
+
+    Словарный row_factory возвращает результаты в форме, удобной для JSON items.
+    Владелец соединения отвечает за его закрытие и commit/rollback.
+    """
     return psycopg.connect(
         host=config.POSTGRES_HOST, port=config.POSTGRES_PORT,
         dbname=config.POSTGRES_DATABASE, user=config.POSTGRES_USER,
@@ -26,7 +35,15 @@ def connect(timeout):
 
 
 def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
-    """Генерировать SQL с привязкой параметров и явной схемой транзакций."""
+    """Сгенерировать SQL-функцию и зависимости параметров от предыдущих узлов.
+
+    Текст запроса проверяется до генерации, а значения из queryReplacement
+    передаются драйверу отдельно от SQL. Batching задаёт, выполняются ли запросы
+    по одному или используют общую транзакцию.
+
+    Returns:
+        Исходный текст модуля и множество имён узлов из expressions параметров.
+    """
     name = node.get("name", "<без имени>")
     p = node.get("parameters", {})
     if set(p) - {"resource", "operation", "query", "options"} or p.get("resource", "database") != "database" or p.get("operation") != "executeQuery":
@@ -37,6 +54,7 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
     options = p.get("options", {})
     if not isinstance(options, dict) or set(options) - {"queryBatching", "queryReplacement", "connectionTimeout", "largeNumbersOutput"} or options.get("queryBatching") not in {"independently", "transaction"}:
         raise WorkflowError(f"Узел {name}: требуется независимое выполнение запросов или transaction")
+    # Разрешён только простой SQL без комментариев, строковых литералов и динамического SQL.
     query = p.get("query")
     if not isinstance(query, str) or not re.match(r"\s*(SELECT|INSERT|UPDATE|DELETE)\b", query, re.I) or not re.fullmatch(r"[a-zA-Z0-9_\s.,()*=<>!+$-]+;?\s*", query) or "--" in query:
         raise WorkflowError(f"Узел {name}: поддерживается простой SELECT, INSERT, UPDATE или DELETE без выражений, комментариев и литералов")
@@ -44,6 +62,7 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
     tokens = re.findall(r"\$(\d+)", query)
     if any(int(token) < 1 or token.startswith("0") for token in tokens) or "$" in re.sub(r"\$\d+", "", query):
         raise WorkflowError(f"Узел {name}: некорректный параметр SQL")
+    # Каждому $N сопоставляется отдельное значение из queryReplacement.
     replacement = options.get("queryReplacement", "")
     if tokens:
         if not isinstance(replacement, str):
@@ -78,6 +97,7 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
                       '            parameters[f"p{index}"] = parameter\n') if tokens else ''
     parameter_code = textwrap.dedent(parameter_code)
     parameter_code = textwrap.indent(parameter_code, "    ") if parameter_code else ""
+    # В transaction все items используют одно соединение и общую транзакцию.
     if options["queryBatching"] == "transaction":
         run_body = f'''    with connect({timeout!r}) as conn:
         for item in items:
@@ -93,10 +113,11 @@ from database.postgres import connect
 
 
 def execute_one(conn, item, items, results, execution):
-    """Выполнить один параметризованный запрос для входного item."""
+    """Подготовить SQL-параметры, выполнить один запрос и обернуть строки в items."""
 {parameter_code}    with conn.cursor() as cursor:
         cursor.execute({query!r}, {arguments})
         rows = cursor.fetchall() if cursor.description is not None else []
+        # Decimal и большие целые превращаются в строки для устойчивой JSON-сериализации.
         for row in rows:
             for column in cursor.description:
                 if column.type_code in (20, 1700) and row[column.name] is not None:
@@ -107,7 +128,7 @@ def execute_one(conn, item, items, results, execution):
 
 
 def {function_name}(items, results, execution):
-    """Выполнить SQL для items отдельно или в общей транзакции."""
+    """Выполнить запрос для входных items с заданным режимом batching."""
     output = []
 {run_body}    return output
 '''

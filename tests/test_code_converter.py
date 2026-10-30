@@ -1,3 +1,8 @@
+"""Проверки переноса Python Code Node в generated-функции.
+
+Тесты проверяют сохранение исходного алгоритма и диагностику неподдерживаемого кода.
+"""
+
 import pytest
 
 from n8n_transcriper.converters.code import generate_code_node
@@ -5,6 +10,7 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def make_node(code, **parameters):
+    """Подготовить Code Node для передачи исходного Python-конвертеру."""
     return {"name": "Python", "parameters": {"language": "pythonNative", "pythonCode": code, **parameters}}
 
 

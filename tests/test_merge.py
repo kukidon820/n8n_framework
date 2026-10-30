@@ -1,3 +1,8 @@
+"""Проверки генерации узла Merge в режимах Append и Combine.
+
+Проверяются объединение items и сопоставление полей между входами.
+"""
+
 import subprocess
 import sys
 
@@ -9,10 +14,12 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def node(name, code):
+    """Создать Python Code Node с исходным кодом для Merge-сценария."""
     return {"id": name, "name": name, "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": code}}
 
 
 def edge(name, input_index=0):
+    """Создать связь на узел и входной порт с заданным индексом."""
     return {"node": name, "type": "main", "index": input_index}
 
 
@@ -42,6 +49,7 @@ def test_merge_without_all_inputs_fails(tmp_path):
 
 
 def make_combine(combine_by, options=None, **params):
+    """Сгенерировать функцию Merge Combine для прямой проверки её результатов."""
     node = {"name": "Merge", "typeVersion": 3.2, "parameters": {"mode": "combine", "combineBy": combine_by,
             "options": options or {}, **params}}
     source, count = generate_merge_node(node, "run")

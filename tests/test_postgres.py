@@ -1,3 +1,8 @@
+"""Проверки generated-кода PostgreSQL-узлов.
+
+Тесты проверяют параметры запросов и транзакции с помощью mock-драйвера.
+"""
+
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -9,6 +14,7 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def postgres_node():
+    """Создать тестовый узел PostgreSQL с параметризованным SELECT-запросом."""
     return {"id": "db", "name": "Get users", "type": "n8n-nodes-base.postgres", "typeVersion": 2.8,
             "credentials": {"postgres": {"id": "one", "name": "Database"}},
             "parameters": {"operation": "executeQuery", "query": "SELECT id FROM users WHERE email = $1",

@@ -1,4 +1,9 @@
-"""Генерация маршрутизации IF и Switch для фильтров n8n."""
+"""Генерация маршрутизации для n8n IF и Switch.
+
+Параметры правил компилируются в явные Python-сравнения. Сгенерированная функция
+возвращает отдельный список items для каждого выхода, чтобы main.py мог выполнить
+только подключённые ветви.
+"""
 
 from typing import Any
 
@@ -7,7 +12,11 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def _filter(condition: Any, node: str) -> tuple[str, set[str]]:
-    """Скомпилировать фильтр n8n и собрать ссылки на предыдущие узлы."""
+    """Преобразовать набор условий в Python-выражение и собрать зависимости.
+
+    Каждый операнд expression компилируется отдельно. Возвращённое множество
+    имён узлов позволяет генератору проверить, что ссылка доступна до фильтра.
+    """
     if not isinstance(condition, dict) or set(condition) - {"options", "conditions", "combinator"}:
         raise WorkflowError(f"Узел {node}: некорректный фильтр")
     options = condition.get("options", {})
@@ -22,6 +31,7 @@ def _filter(condition: Any, node: str) -> tuple[str, set[str]]:
         raise WorkflowError(f"Узел {node}: необходимы условия и корректный combinator")
     compiled = []
     dependencies: set[str] = set()
+    # Таблица одновременно ограничивает поддерживаемый синтаксис и типы операндов.
     operators = {"string": {"equals", "notEquals", "contains", "notContains", "empty", "notEmpty"},
                  "number": {"equals", "notEquals", "gt", "gte", "lt", "lte"},
                  "boolean": {"true", "false", "equals", "notEquals"}}
@@ -50,7 +60,15 @@ def _filter(condition: Any, node: str) -> tuple[str, set[str]]:
 
 
 def generate_condition_node(node: dict[str, Any], function_name: str) -> tuple[str, set[str], int]:
-    """Создать функцию, возвращающую список items для каждого выхода."""
+    """Сгенерировать функцию маршрутизации IF или Switch.
+
+    IF создаёт два выхода. Switch создаёт выход для каждого правила и может
+    добавить fallback-выход. Исходные items остаются без изменений и попадают
+    в каждый совпавший порт согласно настройкам узла.
+
+    Returns:
+        Текст модуля, имена зависимых узлов и число сгенерированных выходов.
+    """
     name = node["name"]
     params = node["parameters"]
     kind = node["type"]
@@ -91,7 +109,11 @@ def generate_condition_node(node: dict[str, Any], function_name: str) -> tuple[s
     else:
         raise WorkflowError(f"Узел {name}: неподдерживаемый тип маршрутизации")
     helper = '''def compare(left, right, kind, operation, case_sensitive):
-    """Сравнить значения по оператору и типу фильтра n8n."""
+    """Проверить одну пару значений с учётом типа и оператора фильтра.
+
+    Числовые сравнения не принимают bool как число; регистр строк меняется
+    только при отключённой case sensitivity.
+    """
     expected = {"string": str, "number": (int, float), "boolean": bool}[kind]
     if not isinstance(left, expected) or (kind == "number" and isinstance(left, bool)):
         raise TypeError("Неверный тип левого значения условия")
@@ -116,5 +138,5 @@ def generate_condition_node(node: dict[str, Any], function_name: str) -> tuple[s
     if operation == "lte": return left <= right
     raise ValueError("Неизвестный оператор")
 '''
-    source = 'import json\n\n\n' + helper + f'\n\ndef {function_name}(items, results, execution):\n    """Разложить входные items по выходам IF или Switch."""\n    outputs = [[] for _ in range({count})]\n    for item in items:\n' + body + '    return outputs\n'
+    source = 'import json\n\n\n' + helper + f'\n\ndef {function_name}(items, results, execution):\n    """Распределить входные items по выходным портам узла.\n\n    Возвращает список портов; внутри каждого порта сохраняется порядок items.\n    """\n    outputs = [[] for _ in range({count})]\n    for item in items:\n' + body + '    return outputs\n'
     return source, dependencies, count

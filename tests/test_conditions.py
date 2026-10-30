@@ -1,3 +1,8 @@
+"""Проверки преобразования IF и Switch в Python-ветвления.
+
+Generated workflow запускаются целиком, чтобы проверить выбор выходного порта.
+"""
+
 import json
 import subprocess
 import sys
@@ -8,21 +13,25 @@ from n8n_transcriper.generator import generate_project
 
 
 def condition(value, operation="equals", kind="string"):
+    """Создать IF-условие для сравнения status с указанным значением."""
     return {"options": {"caseSensitive": True, "typeValidation": "strict"}, "combinator": "and",
             "conditions": [{"leftValue": "={{ $json.status }}", "rightValue": value,
                             "operator": {"type": kind, "operation": operation}}]}
 
 
 def code_node(name, value):
+    """Создать Python-узел, возвращающий метку выбранной ветви."""
     return {"id": name, "name": name, "type": "n8n-nodes-base.code", "parameters": {
         "language": "pythonNative", "pythonCode": f'return [{{"json": {{"branch": {value!r}}}}} for item in _items]'}}
 
 
 def edge(name):
+    """Сформировать connection от текущего узла к указанной цели."""
     return {"node": name, "type": "main", "index": 0}
 
 
 def execute(output, items):
+    """Запустить generated main.py и вернуть его stdout как Python-данные."""
     script = f"import json, main; print(json.dumps(main.run({items!r})))"
     result = subprocess.run([sys.executable, "-c", script], cwd=output, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

@@ -1,4 +1,8 @@
-"""Связи между узлами и порядок исполнения workflow."""
+"""Преобразование n8n connections в связи и порядок генерации узлов.
+
+Модуль не исполняет workflow. Он строит упорядоченный список для генератора,
+сохраняя номера входов и выходов и отделяя служебные AI-связи от main-потока.
+"""
 
 from collections import deque
 from dataclasses import dataclass
@@ -10,7 +14,12 @@ from n8n_transcriper.reader import WorkflowError, validate_workflow
 
 @dataclass(frozen=True)
 class Connection:
-    """Связь с индексами выхода источника и входа получателя."""
+    """Одно ребро графа n8n.
+
+    ``output`` — индекс выхода исходного узла, а ``input`` — индекс входа
+    целевого. ``channel`` сохраняет тип связи, например ``main`` или
+    ``ai_languageModel``.
+    """
 
     source: str
     target: str
@@ -21,8 +30,13 @@ class Connection:
 
 
 def connections(workflow: dict[str, Any]) -> list[Connection]:
-    """Вернуть все связи, включая подключения моделей и инструментов."""
+    """Развернуть вложенный формат ``connections`` в плоский список.
+
+    Перед чтением выполняется структурная проверка. Каждый элемент результата
+    представляет одно ребро и сохраняет канал, индексы портов и тип получателя.
+    """
     validate_workflow(workflow)
+    # Индекс внешнего списка — номер выхода исходного узла.
     return [
         Connection(source, target["node"], channel, output_index,
                    target["index"], target["type"])
@@ -36,7 +50,12 @@ def connections(workflow: dict[str, Any]) -> list[Connection]:
 def _loop_feedback_edges(
     workflow: dict[str, Any], edges: list[Connection]
 ) -> list[Connection]:
-    """Найти соединения из тела Loop Over Items обратно в сам узел."""
+    """Найти рёбра, которые замыкают тело Loop Over Items на его вход.
+
+    Поиск начинается с выхода ``loop`` конкретной версии узла и проходит по
+    main-связям. Найденные рёбра исключаются из топологической сортировки, но
+    сохраняются для генерации цикла.
+    """
     main_edges = [edge for edge in edges if edge.channel == "main"]
     outgoing: dict[str, list[Connection]] = {}
     for edge in main_edges:
@@ -65,15 +84,20 @@ def _loop_feedback_edges(
 
 
 def loop_feedback_edges(workflow: dict[str, Any]) -> list[Connection]:
-    """Вернуть обратные связи цикла, исключаемые из топологического порядка."""
+    """Вернуть обратные рёбра Loop Over Items из проверенного workflow."""
     return _loop_feedback_edges(workflow, connections(workflow))
 
 
 def execution_order(workflow: dict[str, Any]) -> list[str]:
-    """Определить порядок основных узлов, сохраняя порядок исходного списка.
+    """Вернуть топологический порядок узлов основного потока.
 
-    Вспомогательные AI-связи не являются последовательными переходами. Единственная
-    распознаваемая обратная связь — возврат из тела Loop Over Items в сам Loop.
+    Соседние узлы обрабатываются в порядке исходного JSON, если зависимости
+    допускают такой порядок. AI-соединения не влияют на порядок, а распознанная
+    обратная связь Loop удаляется только на время сортировки.
+
+    Raises:
+        WorkflowError: если после удаления обратных связей Loop в main-графе
+            остаётся цикл.
     """
     all_edges = connections(workflow)
     loop_feedback = set(_loop_feedback_edges(workflow, all_edges))
@@ -84,6 +108,7 @@ def execution_order(workflow: dict[str, Any]) -> list[str]:
     for edge in edges:
         incoming[edge.target] += 1
         outgoing[edge.source].append(edge.target)
+    # Алгоритм Кана: в очередь попадают узлы, у которых больше нет родителей.
     ready = deque(name for name in names if incoming[name] == 0)
     result = []
     while ready:
