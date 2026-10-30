@@ -139,7 +139,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         raise WorkflowError(f"Узел {name}: некорректные настройки redirect")
     version = node.get("typeVersion", 4)
     if not isinstance(version, (int, float)) or isinstance(version, bool):
-        raise WorkflowError(f"Узел {name}: некорректная версия HTTP Request")
+        version = 4
     redirection = redirect["redirect"] if redirect is not None else {}
     follow = redirection.get("followRedirects", version >= 4 if redirect is None else False)
     max_redirects = redirection.get("maxRedirects", 21)

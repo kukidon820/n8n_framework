@@ -48,9 +48,6 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
     p = node.get("parameters", {})
     if set(p) - {"resource", "operation", "query", "options"} or p.get("resource", "database") != "database" or p.get("operation") != "executeQuery":
         raise WorkflowError(f"Узел {name}: поддерживается только PostgreSQL executeQuery")
-    version = node.get("typeVersion")
-    if not isinstance(version, (float, int)) or isinstance(version, bool) or version < 2.8:
-        raise WorkflowError(f"Узел {name}: требуется PostgreSQL версии 2.8 или выше")
     options = p.get("options", {})
     if not isinstance(options, dict) or set(options) - {"queryBatching", "queryReplacement", "connectionTimeout", "largeNumbersOutput"} or options.get("queryBatching") not in {"independently", "transaction"}:
         raise WorkflowError(f"Узел {name}: требуется независимое выполнение запросов или transaction")

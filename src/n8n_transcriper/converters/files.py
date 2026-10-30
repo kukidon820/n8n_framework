@@ -532,7 +532,7 @@ def _generate_binary_file(node: dict[str, Any], function_name: str, check: Any) 
     if not isinstance(filename, str) or not isinstance(mime_type, str):
         raise WorkflowError(f"Узел {name}: fileName и mimeType должны быть строками")
     if not isinstance(node_version, (int, float)) or isinstance(node_version, bool):
-        raise WorkflowError(f"Узел {name}: typeVersion должен быть числом")
+        node_version = 1
     strict_base64 = node_version >= 1.2
     module = _BINARY_HELPERS + textwrap.dedent(
         '''\
