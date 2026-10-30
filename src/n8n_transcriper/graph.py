@@ -4,6 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
+from n8n_transcriper.converters.loop import loop_output_indices
 from n8n_transcriper.reader import WorkflowError, validate_workflow
 
 
@@ -32,13 +33,51 @@ def connections(workflow: dict[str, Any]) -> list[Connection]:
     ]
 
 
+def _loop_feedback_edges(
+    workflow: dict[str, Any], edges: list[Connection]
+) -> list[Connection]:
+    """Найти соединения из тела Loop Over Items обратно в сам узел."""
+    main_edges = [edge for edge in edges if edge.channel == "main"]
+    outgoing: dict[str, list[Connection]] = {}
+    for edge in main_edges:
+        outgoing.setdefault(edge.source, []).append(edge)
+
+    feedback = []
+    for node in workflow["nodes"]:
+        if node["type"] != "n8n-nodes-base.splitInBatches":
+            continue
+        loop_output, _, _ = loop_output_indices(node)
+        name = node["name"]
+        starts = [edge.target for edge in outgoing.get(name, []) if edge.output == loop_output]
+        visited: set[str] = set()
+        pending = list(starts)
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            for edge in outgoing.get(current, []):
+                if edge.target == name:
+                    feedback.append(edge)
+                elif edge.target not in visited:
+                    pending.append(edge.target)
+    return feedback
+
+
+def loop_feedback_edges(workflow: dict[str, Any]) -> list[Connection]:
+    """Вернуть обратные связи цикла, исключаемые из топологического порядка."""
+    return _loop_feedback_edges(workflow, connections(workflow))
+
+
 def execution_order(workflow: dict[str, Any]) -> list[str]:
     """Определить порядок основных узлов, сохраняя порядок исходного списка.
 
-    Вспомогательные AI-связи не являются последовательными переходами и
-    возвращаются отдельно через connections(). Циклы нельзя свести к цепочке.
+    Вспомогательные AI-связи не являются последовательными переходами. Единственная
+    распознаваемая обратная связь — возврат из тела Loop Over Items в сам Loop.
     """
-    edges = [edge for edge in connections(workflow) if edge.channel == "main"]
+    all_edges = connections(workflow)
+    loop_feedback = set(_loop_feedback_edges(workflow, all_edges))
+    edges = [edge for edge in all_edges if edge.channel == "main" and edge not in loop_feedback]
     names = [node["name"] for node in workflow["nodes"]]
     incoming = dict.fromkeys(names, 0)
     outgoing: dict[str, list[str]] = {name: [] for name in names}
