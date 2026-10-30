@@ -19,7 +19,7 @@ from n8n_transcriper.converters.code import generate_code_node
 from n8n_transcriper.converters.ai import generate_ai_agent
 from n8n_transcriper.converters.conditions import generate_condition_node
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
-from n8n_transcriper.converters.files import generate_file_node
+from n8n_transcriper.converters.files import file_node_dependencies, generate_file_node
 from n8n_transcriper.converters.http import (
     generate_http_node,
     http_credential_fields,
@@ -111,6 +111,11 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
         if not isinstance(kind, str) or not isinstance(node.get("parameters"), dict):
             continue
 
+        trigger_name = kind.rsplit(".", 1)[-1].lower()
+        if trigger_name.endswith("trigger") or kind == "n8n-nodes-base.webhook":
+            # Триггеры не преобразуются и не участвуют в проверке настроек узлов.
+            continue
+
         for setting in ("disabled", "continueOnFail"):
             if node.get(setting, False) is not False:
                 issues.append((name, f"{label}: настройка {setting} не поддерживается."))
@@ -125,11 +130,6 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
         if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
             issues.append((name, f"{label}: настройка retryOnFail не поддерживается."))
 
-        trigger_name = kind.rsplit(".", 1)[-1].lower()
-        if trigger_name.endswith("trigger") or kind == "n8n-nodes-base.webhook":
-            if index != 1:
-                issues.append((name, f"{label}: узел запуска должен стоять первым."))
-            continue
         if name in model_nodes:
             continue
         if kind not in SUPPORTED_NODE_TYPES:
@@ -484,6 +484,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     loop_body_nodes = loop_info["body"] if loop_info else set()
     converted = 0
     skipped = 0
+    skipped_triggers: list[dict[str, Any]] = []
     dependencies: set[str] = set()
     completed: set[str] = set()
     ai_model_configs: dict[str, dict[str, Any]] = {}
@@ -495,9 +496,24 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     http_credential_descriptions: dict[str, set[str]] = {}
     postgres_credential = None
     # Для каждого узла создаём отдельный модуль; ниже формируется его вызов в main.py.
-    for index, name in enumerate(order):
+    for name in order:
         node = nodes[name]
         kind = node["type"]
+        # Оставляем в main.py отметку обо всех узлах, в том числе о пропущенных триггерах.
+        node_comment = name.replace("\r", " ").replace("\n", " ")
+        kind_comment = kind.replace("\r", " ").replace("\n", " ")
+        calls.append(f"    # Узел n8n «{node_comment}» ({kind_comment})")
+        trigger_name = kind.rsplit(".", 1)[-1].lower()
+        if trigger_name.endswith("trigger") or kind == "n8n-nodes-base.webhook":
+            skipped += 1
+            skipped_triggers.append({
+                "name": name,
+                "type": kind,
+                "parameters": node.get("parameters", {}),
+            })
+            if branching:
+                calls.append(f"    {aliases[name]} = [items]")
+            continue
         for setting in ("disabled", "continueOnFail"):
             if node.get(setting, False) is not False:
                 raise WorkflowError(f"Узел {name}: настройка {setting} пока не поддерживается")
@@ -510,20 +526,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             raise WorkflowError(f"Узел {name}: настройка onError пока не поддерживается")
         if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
             raise WorkflowError(f"Узел {name}: настройка retryOnFail пока не поддерживается")
-        # Этот комментарий попадёт в generated main.py перед блоком вызова узла.
-        # Убираем переводы строк, чтобы имя из JSON не могло изменить структуру файла.
-        node_comment = name.replace("\r", " ").replace("\n", " ")
-        kind_comment = kind.replace("\r", " ").replace("\n", " ")
-        calls.append(f"    # Узел n8n «{node_comment}» ({kind_comment})")
         # Триггеры намеренно не запускаются: сгенерированный проект вызывается вручную.
-        trigger_name = kind.rsplit(".", 1)[-1].lower()
-        if trigger_name.endswith("trigger") or kind == "n8n-nodes-base.webhook":
-            if index != 0:
-                raise WorkflowError(f"Узел {name}: триггер должен быть первым")
-            skipped += 1
-            if branching:
-                calls.append(f"    {aliases[name]} = [items]")
-            continue
         # Конвертер узла возвращает исходник функции и зависимости её параметров.
         stem = module_names[name]
         function = "run_node"
@@ -533,7 +536,10 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             arguments = "items"
         elif kind in {"n8n-nodes-base.convertToFile", "n8n-nodes-base.compression", "n8n-nodes-base.extractFromFile"}:
             folder = "file_nodes"
-            source = generate_file_node(node, function)
+            settings = workflow.get("settings", {})
+            timezone_name = settings.get("timezone") if isinstance(settings, dict) else None
+            source = generate_file_node(node, function, timezone_name)
+            dependencies.update(file_node_dependencies(node))
             arguments = "items"
         elif kind == "n8n-nodes-base.httpRequest":
             params = node.get("parameters", {})
@@ -1017,10 +1023,34 @@ def _clean_items(items):
     if postgres_credential is not None:
         required.extend(["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"])
     credentials = ', '.join(f'`{key}`' for key in required) if required else 'не требуются'
+    trigger_documentation = ""
+    if skipped_triggers:
+        trigger_sections = []
+        for trigger in skipped_triggers:
+            trigger_name = trigger["name"].replace("\r", " ").replace("\n", " ").replace("`", "\\`")
+            trigger_type = trigger["type"].replace("\r", " ").replace("\n", " ").replace("`", "\\`")
+            parameters = json.dumps(trigger["parameters"], ensure_ascii=False, indent=2)
+            fence = "```"
+            while fence in parameters:
+                fence += "`"
+            trigger_sections.append(
+                f"### {trigger_name}\n\n"
+                f"- Тип n8n: `{trigger_type}`\n"
+                "- Параметры:\n\n"
+                f"{fence}json\n{parameters}\n{fence}\n"
+            )
+        trigger_documentation = (
+            "## Триггеры исходного workflow\n\n"
+            "Триггеры из JSON приведены ниже для справки. Они не исполняются; "
+            "сгенерированный workflow запускается вручную через `main.py`.\n\n"
+            + "\n".join(trigger_sections)
+            + "\n"
+        )
     files["README.md"] = (
         '# Сгенерированный проект\n\n'
         'Проект запускает преобразованный workflow как обычную Python-программу. Исходный JSON для запуска не нужен.\n\n'
-        '## Требования и установка\n\n'
+        + trigger_documentation
+        + '## Требования и установка\n\n'
         'Нужен Python 3.12 или новее и установленный uv. Файл `.python-version` выбирает Python 3.12 для команд uv. '
         'Зависимости указаны в `pyproject.toml`, '
         'точные версии зафиксированы в `uv.lock`. В каталоге проекта выполните:\n\n'
