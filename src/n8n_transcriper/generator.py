@@ -3,6 +3,7 @@
 import hashlib
 import json
 import keyword
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -613,6 +614,19 @@ def _clean_items(items):
         "pause\r\n"
         "exit /b %workflow_exit_code%\r\n"
     )
+    files["run.sh"] = (
+        "#!/usr/bin/env sh\n"
+        "set -u\n"
+        'cd "$(dirname "$0")" || exit 1\n'
+        "uv run python main.py\n"
+        "workflow_exit_code=$?\n"
+        'if [ -t 0 ]; then\n'
+        '    printf "\\nWorkflow finished with exit code %s.\\n" "$workflow_exit_code"\n'
+        '    printf "Press Enter to close this terminal..."\n'
+        '    IFS= read -r _\n'
+        "fi\n"
+        'exit "$workflow_exit_code"\n'
+    )
     config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
     for prefix, model_config in sorted(ai_model_configs.items()):
         api_url = model_config["api_url"]
@@ -706,8 +720,8 @@ def _clean_items(items):
         'PowerShell: `$env:ИМЯ_ПЕРЕМЕННОЙ = "значение"`. Linux/macOS: `export ИМЯ_ПЕРЕМЕННОЙ="значение"`.\n\n'
         '## Запуск\n\n'
         'Запустите workflow командой `uv run python main.py` на Windows, Linux и macOS. '
-        'В Windows также можно запустить `run.bat`: окно CMD будет ждать нажатия клавиши после выполнения, '
-        'чтобы можно было спокойно посмотреть логи.\n\n'
+        'Помимо команды выше, используйте `run.bat` на Windows или `sh run.sh` на Linux/macOS. '
+        'В интерактивном терминале эти скрипты ждут подтверждения после выполнения, чтобы оставить логи на экране.\n\n'
         '`main.py` можно импортировать из другого кода: `from main import run`; функция `run(input_data)` принимает список items вида `[{"json": {...}}]`.\n'
     )
     files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'
@@ -724,4 +738,6 @@ def _clean_items(items):
         target = output / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        if path == "run.sh" and os.name != "nt":
+            target.chmod(target.stat().st_mode | 0o111)
     return files
