@@ -604,15 +604,15 @@ def _clean_items(items):
         '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    """Выполнить workflow; input_data — список n8n items."""\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)\n    run()\n')
     files["run.bat"] = (
-        "@echo off\r\n"
-        "setlocal\r\n"
-        'cd /d "%~dp0"\r\n'
-        "uv run python main.py\r\n"
-        'set "workflow_exit_code=%ERRORLEVEL%"\r\n'
-        'if not "%workflow_exit_code%"=="0" echo Workflow failed with exit code %workflow_exit_code%.\r\n'
-        "echo.\r\n"
-        "pause\r\n"
-        "exit /b %workflow_exit_code%\r\n"
+        "@echo off\n"
+        "setlocal\n"
+        'cd /d "%~dp0"\n'
+        "uv run python main.py\n"
+        'set "workflow_exit_code=%ERRORLEVEL%"\n'
+        'if not "%workflow_exit_code%"=="0" echo Workflow failed with exit code %workflow_exit_code%.\n'
+        "echo.\n"
+        "pause\n"
+        "exit /b %workflow_exit_code%\n"
     )
     files["run.sh"] = (
         "#!/usr/bin/env sh\n"
@@ -737,7 +737,8 @@ def _clean_items(items):
     for path, content in files.items():
         target = output / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        newline = "\r\n" if path == "run.bat" else "" if path == "run.sh" else None
+        target.write_text(content, encoding="utf-8", newline=newline)
         if path == "run.sh" and os.name != "nt":
             target.chmod(target.stat().st_mode | 0o111)
     return files

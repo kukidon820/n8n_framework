@@ -80,12 +80,19 @@ def test_generated_main_writes_info_logs_to_stdout_and_includes_platform_launche
     assert "[INFO] Build: completed" in result.stdout
     assert result.stderr == ""
 
-    launcher = (output / "run.bat").read_text(encoding="utf-8")
+    launcher_path = output / "run.bat"
+    launcher_bytes = launcher_path.read_bytes()
+    assert b"\r\n" in launcher_bytes
+    assert b"\r\r\n" not in launcher_bytes
+    launcher = launcher_path.read_text(encoding="utf-8")
     assert "uv run python main.py" in launcher
     assert "pause" in launcher.lower()
     assert "exit /b %workflow_exit_code%" in launcher
 
-    unix_launcher = (output / "run.sh").read_text(encoding="utf-8")
+    unix_launcher_path = output / "run.sh"
+    unix_launcher_bytes = unix_launcher_path.read_bytes()
+    assert b"\r" not in unix_launcher_bytes
+    unix_launcher = unix_launcher_path.read_text(encoding="utf-8")
     assert unix_launcher.startswith("#!/usr/bin/env sh\n")
     assert "uv run python main.py" in unix_launcher
     assert 'exit "$workflow_exit_code"' in unix_launcher
