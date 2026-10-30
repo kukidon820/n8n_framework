@@ -6,14 +6,14 @@
 
 ## Быстрый запуск
 
-Требуются Python 3.11+ и [uv](https://docs.astral.sh/uv/).
+Требуются Python 3.12+ и [uv](https://docs.astral.sh/uv/). Файл `.python-version` выбирает Python 3.12 для команд uv.
 
 ```bash
 uv sync
 uv run python convert.py workflow.json --out generated
 ```
 
-Каталог `generated` должен отсутствовать или быть пустым. В нём появятся `main.py`, `config.py`, `pyproject.toml`, `uv.lock`, `requirements.txt`, `README.md`, `conversion_report.md` и модули для используемых узлов. При конвертации uv разрешит зависимости и создаст lock-файл.
+Каталог `generated` должен отсутствовать или быть пустым. В нём появятся `main.py`, `config.py`, `pyproject.toml`, `.python-version`, `uv.lock`, `requirements.txt`, `README.md`, `conversion_report.md` и модули для используемых узлов. При конвертации uv разрешит зависимости и создаст lock-файл.
 
 ## Команды
 

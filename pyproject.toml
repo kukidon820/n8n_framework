@@ -2,7 +2,7 @@
 name = "n8n-transcriper"
 version = "0.1.0"
 description = "Генерация самостоятельных Python-проектов из workflow n8n"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = ["typer>=0.12"]
 
 [project.scripts]
