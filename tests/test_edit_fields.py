@@ -1,3 +1,8 @@
+"""Проверки генерации узлов Edit Fields / Set.
+
+Проверяются вычисление assignments и сохранение исходных полей items.
+"""
+
 import pytest
 
 from n8n_transcriper.converters.edit_fields import generate_edit_fields

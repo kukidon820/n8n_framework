@@ -1,3 +1,8 @@
+"""Проверки чтения и валидации workflow JSON.
+
+Проверяется структура документа и сбор нескольких диагностик за один проход.
+"""
+
 import json
 import io
 from pathlib import Path

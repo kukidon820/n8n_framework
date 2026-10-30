@@ -1,3 +1,8 @@
+"""Проверки генерации AI Agent и HTTP-вызовов chat-моделей.
+
+Проверяются настройки модели, prompt и работа generated-кода без внешнего API.
+"""
+
 import sys
 from types import SimpleNamespace
 
@@ -6,6 +11,7 @@ from n8n_transcriper.generator import generate_project
 
 
 def model_node():
+    """Сформировать test-модель OpenRouter с фиксированными параметрами."""
     return {
         "id": "model-1", "name": "OpenRouter Chat Model",
         "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
@@ -16,6 +22,7 @@ def model_node():
 
 
 def agent_node():
+    """Создать AI Agent, ссылающийся на модель и два prompt-шаблона."""
     return {
         "id": "agent-1", "name": "AI Agent - Analyze CSV",
         "type": "@n8n/n8n-nodes-langchain.agent",

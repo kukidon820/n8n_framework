@@ -1,3 +1,8 @@
+"""Проверки генерации HTTP Request функций.
+
+Подменённые клиенты позволяют проверять заголовки, тело, авторизацию, retry и ответы.
+"""
+
 import sys
 from types import SimpleNamespace
 

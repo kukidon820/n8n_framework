@@ -1,3 +1,8 @@
+"""Проверки узла Loop Over Items и его generated-класса.
+
+Проверяются размеры пакетов, выходы Loop/Done, reset и накопление результатов.
+"""
+
 import subprocess
 import sys
 
@@ -10,6 +15,7 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def node(name, kind, parameters=None, version=1):
+    """Собрать n8n-узел заданного типа, версии и набора параметров."""
     return {
         "id": name,
         "name": name,
@@ -20,10 +26,12 @@ def node(name, kind, parameters=None, version=1):
 
 
 def link(name, index=0):
+    """Создать связь main-канала на узел с выбранным индексом входа."""
     return {"node": name, "type": "main", "index": index}
 
 
 def standard_loop_workflow(loop_version=3):
+    """Построить полный тестовый цикл с выдачей, обработкой и обратной связью."""
     loop_parameters = {"batchSize": 2, "options": {"reset": False}}
     loop = node("Loop Items", "n8n-nodes-base.splitInBatches", loop_parameters, loop_version)
     if int(loop_version) == 1:

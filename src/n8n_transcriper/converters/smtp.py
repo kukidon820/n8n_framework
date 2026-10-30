@@ -1,4 +1,9 @@
-"""Преобразование Gmail API send в отправку письма через SMTP."""
+"""Генерация SMTP-отправителей для Gmail API и n8n Send Email.
+
+Один путь преобразует MIME raw, подготовленный Gmail API-узлом, в SMTP-письмо;
+второй строит письмо из стандартных полей Send Email. Оба используют параметры
+SMTP из config.py и передают вложения как bytes.
+"""
 
 from typing import Any
 
@@ -10,14 +15,21 @@ GMAIL_SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
 
 
 def is_gmail_send_node(node: dict[str, Any]) -> bool:
-    """Определить HTTP Request, который отправляет письмо через Gmail API."""
+    """Проверить, что HTTP Request обращается к endpoint отправки Gmail API."""
     parameters = node.get("parameters", {})
     url = parameters.get("url") if isinstance(parameters, dict) else None
     return isinstance(url, str) and url.rstrip("/") == GMAIL_SEND_URL
 
 
 def generate_smtp_node(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
-    """Создать SMTP-отправитель из MIME raw, ожидаемого Gmail API."""
+    """Сгенерировать SMTP-функцию для Gmail API запроса с MIME raw.
+
+    Выражение jsonBody продолжает вычисляться из workflow, но отправка Gmail API
+    заменяется разбором RFC MIME и передачей письма через SMTP с паролем приложения.
+
+    Returns:
+        Исходник SMTP-модуля и узлы, данные которых использует jsonBody.
+    """
     name = node.get("name", "<без имени>")
     parameters = node.get("parameters", {})
     if not isinstance(parameters, dict):
@@ -34,6 +46,7 @@ def generate_smtp_node(node: dict[str, Any], function_name: str) -> tuple[str, s
     timeout_ms = options.get("timeout", 60000) if isinstance(options, dict) else 60000
     if not isinstance(timeout_ms, (int, float)) or isinstance(timeout_ms, bool) or timeout_ms <= 0:
         raise WorkflowError(f"Узел {name}: SMTP timeout должен быть положительным числом")
+    # raw MIME остаётся выражением узла; декодирование и адресаты выполняются при запуске.
     body = compile_expression(body_value, node=name, parameter="jsonBody")
     timeout = timeout_ms / 1000
     source = f'''import base64
@@ -48,7 +61,12 @@ import config
 
 
 def {function_name}(items, results, execution):
-    """Отправить подготовленные MIME-письма через SMTP с паролем приложения."""
+    """Разобрать Gmail raw MIME и отправить каждое письмо через SMTP.
+
+    Gmail raw декодируется из base64url, заголовок To становится списком
+    получателей, а транспорт шифруется SSL либо STARTTLS по config.py.
+    """
+    # Секреты не встраиваются в модуль; SMTP требует включённого TLS-режима.
     if not config.SMTP_USERNAME or not config.SMTP_APP_PASSWORD:
         raise ValueError("Задайте SMTP_USERNAME и SMTP_APP_PASSWORD в config.py или окружении")
     if config.SMTP_USE_SSL and config.SMTP_STARTTLS:
@@ -64,6 +82,7 @@ def {function_name}(items, results, execution):
         if not isinstance(body, dict) or not isinstance(body.get("raw"), str) or not body["raw"]:
             raise ValueError("SMTP-узел ожидает Gmail raw MIME в jsonBody")
 
+        # Gmail API использует base64url без обязательного padding.
         raw = body["raw"]
         raw += "=" * (-len(raw) % 4)
         message_bytes = base64.urlsafe_b64decode(raw)
@@ -72,6 +91,7 @@ def {function_name}(items, results, execution):
         if not recipients:
             raise ValueError("В MIME-письме отсутствуют получатели в заголовке To")
 
+        # Если MIME не содержит From, используем настроенный адрес SMTP-аккаунта.
         sender = config.SMTP_FROM or config.SMTP_USERNAME
         if "From" not in message:
             message["From"] = sender
@@ -98,7 +118,15 @@ def {function_name}(items, results, execution):
 
 
 def generate_email_send_node(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
-    """Создать SMTP-отправитель для стандартного узла n8n Send Email."""
+    """Сгенерировать письмо из полей стандартного узла n8n Send Email.
+
+    Конвертер проверяет формат содержимого, expressions, credentials, адресатов,
+    вложения и TLS-параметры. Generated-функция создаёт EmailMessage и отправляет
+    его через SMTP; credentials из n8n не переносятся как реальные секреты.
+
+    Returns:
+        Исходник функции и имена узлов, используемых expressions письма.
+    """
     name = node.get("name", "<без имени>")
     parameters = node.get("parameters", {})
     if not isinstance(parameters, dict):
@@ -117,6 +145,7 @@ def generate_email_send_node(node: dict[str, Any], function_name: str) -> tuple[
     version = node.get("typeVersion", 2.1)
     if not isinstance(version, (int, float)) or isinstance(version, bool):
         raise WorkflowError(f"Узел {name}: typeVersion Email Send должен быть числом")
+    # n8n менял формат по умолчанию между версиями Email Send.
     default_format = "html" if version < 2 else "text"
     email_format = parameters.get("emailFormat", default_format)
     if not isinstance(email_format, str) or email_format not in {"text", "html", "both"}:
@@ -129,6 +158,7 @@ def generate_email_send_node(node: dict[str, Any], function_name: str) -> tuple[
         parameter_names.append("text")
     if email_format in {"html", "both"}:
         parameter_names.append("html")
+    # Все заголовки и тела могут содержать expressions с ссылками на предыдущие узлы.
     for parameter in parameter_names:
         value = parameters.get(parameter, "")
         if not isinstance(value, str):
@@ -172,6 +202,7 @@ def generate_email_send_node(node: dict[str, Any], function_name: str) -> tuple[
     if not isinstance(allow_unauthorized_certs, bool):
         raise WorkflowError(f"Узел {name}: параметр options.allowUnauthorizedCerts должен быть логическим")
 
+    # Ниже создаётся обычный модуль: вспомогательные функции разбирают адреса и binary.
     source = f'''import base64
 import json
 import smtplib
@@ -183,6 +214,7 @@ import config
 
 
 def _mail_string(value):
+    """Преобразовать значение адреса или поля письма в текст."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -191,10 +223,12 @@ def _mail_string(value):
 
 
 def _addresses(value):
+    """Разобрать один или несколько email-адресов из заголовка."""
     return [address for _, address in getaddresses([_mail_string(value)]) if address]
 
 
 def _binary_properties(value):
+    """Развернуть список имён binary-полей из строки или массива."""
     if isinstance(value, str):
         return [part.strip() for part in value.split(",") if part.strip()]
     if isinstance(value, (list, tuple)):
@@ -203,6 +237,7 @@ def _binary_properties(value):
 
 
 def _binary_content(item, property_name):
+    """Вернуть bytes и метаданные выбранного binary-вложения."""
     binary = item.get("binary", {{}})
     metadata = binary.get(property_name) if isinstance(binary, dict) else None
     if not isinstance(metadata, dict):
@@ -216,7 +251,12 @@ def _binary_content(item, property_name):
 
 
 def {function_name}(items, results, execution):
-    """Сформировать и отправить письма через SMTP credentials из config.py."""
+    """Собрать EmailMessage для каждого item и отправить его через SMTP.
+
+    To/Cc/Bcc объединяются для транспорта; текст, HTML и вложения добавляются
+    в MIME по параметрам узла. В ответ возвращаются подтверждённые адресаты.
+    """
+    # Проверяем параметры транспортного уровня до сборки MIME-сообщения.
     if not config.SMTP_HOST:
         raise ValueError("Задайте SMTP_HOST в config.py или переменных окружения")
     if not config.SMTP_USERNAME or not config.SMTP_APP_PASSWORD:
@@ -240,6 +280,7 @@ def {function_name}(items, results, execution):
         text_body = _mail_string({values.get('text', "''")})
         html_body = _mail_string({values.get('html', "''")})
 
+        # Attribution добавляется только если она включена в параметрах узла.
         if {append_attribution!r}:
             attribution = "This email was sent automatically with n8n"
             if {email_format!r} in {{"text", "both"}}:
@@ -264,6 +305,7 @@ def {function_name}(items, results, execution):
             message.set_content(text_body)
             message.add_alternative(html_body, subtype="html")
 
+        # Inline-вложения привязываются к HTML-части по Content-ID.
         inline_names = _binary_properties({option_values['attachments']})
         if inline_names:
             html_part = message.get_body(preferencelist=("html",))
@@ -283,6 +325,7 @@ def {function_name}(items, results, execution):
                     filename=metadata.get("fileName") or "unknown",
                 )
 
+        # Обычные вложения добавляются отдельными MIME-частями.
         for property_name in _binary_properties({option_values['fileAttachments']}):
             content, metadata = _binary_content(item, property_name)
             mime_type = str(metadata.get("mimeType") or "application/octet-stream").split(";", 1)[0]
@@ -296,6 +339,7 @@ def {function_name}(items, results, execution):
                 filename=metadata.get("fileName") or "unknown",
             )
 
+        # SMTP принимает единый список адресатов, хотя письмо сохраняет заголовки To/Cc.
         recipients = _addresses(to_email) + _addresses(cc_email) + _addresses(bcc_email)
         if not recipients:
             raise ValueError("В Email Send не указан ни один адрес получателя")
