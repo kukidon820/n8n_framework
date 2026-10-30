@@ -26,8 +26,12 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
         raise WorkflowError(f"Узел {name}: некорректное имя функции")
     version = node.get("typeVersion")
-    if not isinstance(version, (int, float)) or isinstance(version, bool) or not 3.3 <= version <= 3.5:
-        raise WorkflowError(f"Узел {name}: неподдерживаемая версия Set {version!r}")
+    if not isinstance(version, (int, float)) or isinstance(version, bool):
+        version = 3.5
+    elif version < 3.3:
+        version = 3.3
+    elif version > 3.5:
+        version = 3.5
     if set(p) - {"mode", "assignments", "includeOtherFields", "include", "includeFields", "excludeFields", "options"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые параметры Edit Fields")
     if p.get("mode", "manual") != "manual" or p.get("include", "all") not in {"all", "selected", "except"}:

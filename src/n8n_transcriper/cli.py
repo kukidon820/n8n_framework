@@ -18,6 +18,7 @@ from n8n_transcriper.reader import (
     validate_workflow_issues,
 )
 from n8n_transcriper.generator import generate_project, node_conversion_issues
+from n8n_transcriper.versioning import node_version_warnings
 
 app = typer.Typer(help="Инструменты для преобразования workflow n8n в Python.")
 
@@ -95,6 +96,59 @@ def _make_validation_placeholder(node: dict) -> None:
     node["retryOnFail"] = False
 
 
+def _indentation_error_details(source: str, error: IndentationError) -> str:
+    """Объяснить ошибку отступа по уровням соседних строк без вывода исходного кода."""
+    lines = source.splitlines()
+
+    def indentation(line: str) -> str:
+        prefix = line[: len(line) - len(line.lstrip(" \t"))]
+        spaces = prefix.count(" ")
+        tabs = prefix.count("\t")
+        parts = []
+        if spaces:
+            parts.append(f"{spaces} пробелов")
+        if tabs:
+            parts.append(f"{tabs} табуляций")
+        return " и ".join(parts) if parts else "без отступа"
+
+    error_line = max(1, error.lineno or 1)
+    # Ищем частый случай генерации: docstring функции вложен сильнее ее команд.
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped.startswith(('"""', "'''")):
+            continue
+        previous = next((lines[pos].strip() for pos in range(index - 1, -1, -1) if lines[pos].strip()), "")
+        following_index = next(
+            (pos for pos in range(index + 1, len(lines)) if lines[pos].strip()), None
+        )
+        if not previous.startswith("def ") or following_index is None:
+            continue
+        following = lines[following_index]
+        doc_indent = indentation(line)
+        code_indent = indentation(following)
+        if doc_indent != code_indent and abs((index + 1) - error_line) <= 2:
+            return (
+                f"строка {index + 1} содержит docstring функции с отступом {doc_indent}, "
+                f"а следующая команда в строке {following_index + 1} начинается с {code_indent}. "
+                "Python не может определить единый уровень тела функции. Поставьте docstring "
+                "на один уровень с командами функции (обычно 4 пробела)."
+            )
+
+    reason = {
+        "unexpected indent": "перед командой появился лишний отступ",
+        "unindent does not match any outer indentation level": "отступ команды не совпадает с уровнем внешнего блока",
+        "inconsistent use of tabs and spaces in indentation": "в отступах смешаны табуляции и пробелы",
+    }.get(error.msg, "Python не смог разобрать уровни отступов")
+    nearby = []
+    for index in range(max(0, error_line - 2), min(len(lines), error_line + 1)):
+        if lines[index].strip():
+            nearby.append(f"строка {index + 1}: {indentation(lines[index])} перед кодом")
+    details = f"{reason}. Проверьте, чтобы строки одного блока имели согласованные отступы."
+    if nearby:
+        details += " Уровни рядом: " + "; ".join(nearby) + "."
+    return details
+
+
 def _validate_generated_project(
     workflow: dict,
     known_invalid_nodes: set[str],
@@ -143,9 +197,10 @@ def _validate_generated_project(
                     "unexpected indent": "неожиданный отступ",
                     "unindent does not match any outer indentation level": "отступ не соответствует окружающему коду",
                 }.get(exc.msg, "синтаксическая ошибка")
-                issues.append(
-                    f"Файл {relative_path}, строка {exc.lineno}, столбец {exc.offset}: {reason}."
-                )
+                location = f"Файл {relative_path}, строка {exc.lineno}, столбец {exc.offset}: {reason}."
+                if isinstance(exc, IndentationError):
+                    location += " Причина: " + _indentation_error_details(source, exc)
+                issues.append(location)
         return issues, len(python_files)
 
     issues.append("Не удалось завершить проверку всех узлов.")
@@ -169,7 +224,11 @@ def convert(
         out: Пустая папка, куда записываются файлы проекта.
     """
     try:
-        generate_project(read_workflow(workflow), out)
+        data = read_workflow(workflow)
+        warnings = node_version_warnings(data)
+        for _, warning in warnings:
+            _echo_terminal_safe(f"Предупреждение: {warning}")
+        generate_project(data, out)
         _create_uv_lock(out)
     except (WorkflowError, OSError) as exc:
         typer.echo(f"Ошибка: {exc}", err=True)
@@ -210,6 +269,7 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
         _echo_terminal_safe(f"Файл: {workflow}", err=True)
         _echo_terminal_safe(f"Подробности: {exc}", err=True)
         raise typer.Exit(1) from exc
+    version_warnings = node_version_warnings(data)
 
     # Сначала собираются независимые ошибки структуры и настроек каждого узла.
     structural_issues = validate_workflow_issues(data)
@@ -244,6 +304,8 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
         _echo_terminal_safe("Проверка workflow не пройдена.", err=True)
         _echo_terminal_safe(f"Файл: {workflow}", err=True)
         _echo_terminal_safe(f"Обнаружено проблем: {len(issues)}", err=True)
+        for _, warning in version_warnings:
+            _echo_terminal_safe(f"Предупреждение: {warning}", err=True)
         for index, (stage, issue) in enumerate(issues, start=1):
             _echo_terminal_safe(f"{index}. [{stage}] {issue}", err=True)
         raise typer.Exit(1)
@@ -262,3 +324,5 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
     )
     _echo_terminal_safe(f"Синтаксис сгенерированного Python проверен: {python_file_count} файлов.")
     _echo_terminal_safe("Ошибок совместимости, графа и expressions не найдено.")
+    for _, warning in version_warnings:
+        _echo_terminal_safe(f"Предупреждение: {warning}")

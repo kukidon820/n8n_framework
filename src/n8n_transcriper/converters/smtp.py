@@ -144,7 +144,7 @@ def generate_email_send_node(node: dict[str, Any], function_name: str) -> tuple[
 
     version = node.get("typeVersion", 2.1)
     if not isinstance(version, (int, float)) or isinstance(version, bool):
-        raise WorkflowError(f"Узел {name}: typeVersion Email Send должен быть числом")
+        version = 2.1
     # n8n менял формат по умолчанию между версиями Email Send.
     default_format = "html" if version < 2 else "text"
     email_format = parameters.get("emailFormat", default_format)

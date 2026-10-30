@@ -22,9 +22,6 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     """
     name = node["name"]
     p = node["parameters"]
-    version = node.get("typeVersion")
-    if not isinstance(version, (int, float)) or isinstance(version, bool) or version < 3 or version >= 4:
-        raise WorkflowError(f"Узел {name}: поддерживается Merge версии 3")
     # Append не требует правил сопоставления; Combine проверяется отдельной веткой.
     mode = p.get("mode", "append")
     if mode not in {"append", "combine"}:
@@ -36,7 +33,7 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
         if set(p) - {"mode", "numberInputs", "options"} or p.get("options", {}):
             raise WorkflowError(f"Узел {name}: неподдерживаемые настройки Merge Append")
         return f'''def {function_name}(inputs):
-            """Добавить items всех входов подряд, сохраняя порядок портов."""
+    """Добавить items всех входов подряд, сохраняя порядок портов."""
     result = []
     for input_index, items in enumerate(inputs):
         for item_index, item in enumerate(items):

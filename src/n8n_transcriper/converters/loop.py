@@ -35,16 +35,20 @@ def loop_output_indices(node: dict[str, Any]) -> tuple[int, int | None, int]:
     соответствующей поддерживаемой основной версии.
     """
     version = node.get("typeVersion", 3)
-    if isinstance(version, bool) or not isinstance(version, (int, float)) or version < 1:
-        raise WorkflowError(f"Узел {node.get('name', '<без имени>')}: некорректная версия Loop Over Items {version!r}")
+    if isinstance(version, bool) or not isinstance(version, (int, float)):
+        version = 3
     version = int(version)
+    if version < 1:
+        version = 1
+    elif version > 3:
+        version = 3
     if version == 1:
         return 0, None, 1
     if version == 2:
         return 0, 1, 2
     if version == 3:
         return 1, 0, 2
-    raise WorkflowError(f"Узел {node.get('name', '<без имени>')}: версия Loop Over Items {version} не поддерживается")
+    return 1, 0, 2
 
 
 def generate_loop_node(node: dict[str, Any]) -> LoopSettings:
@@ -57,7 +61,9 @@ def generate_loop_node(node: dict[str, Any]) -> LoopSettings:
     name = node.get("name", "<без имени>")
     parameters = node.get("parameters", {})
     loop_output, done_output, output_count = loop_output_indices(node)
-    version = int(node.get("typeVersion", 3))
+    raw_version = node.get("typeVersion", 3)
+    version = int(raw_version) if isinstance(raw_version, (int, float)) and not isinstance(raw_version, bool) else 3
+    version = min(max(version, 1), 3)
     if not isinstance(parameters, dict) or set(parameters) - {"batchSize", "options"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые параметры Loop Over Items")
 
@@ -97,14 +103,32 @@ class Loop:
     накопленные выходы именованных узлов, нужные expressions внутри цикла.
     """
 
-    def __init__(self, batch_size=1, reset=False):
-        """Сохранить настройки и подготовить пустое состояние текущего запуска."""
+    def __init__(self, batch_size=1, reset=False, n8n_manual_parameters=None):
+        """Сохранить настройки и подготовить пустое состояние текущего запуска.
+
+        ``n8n_manual_parameters`` содержит шаблон настроек узла, версия которого
+        использовала fallback; заполните значения и реализуйте эти настройки
+        вручную, если они отличаются от известного поведения.
+        """
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
             raise ValueError("batch_size должен быть целым числом не меньше 1")
         if not isinstance(reset, bool):
             raise TypeError("reset должен быть логическим значением")
+        unsupported_paths = (
+            n8n_manual_parameters.get("unsupported_parameter_paths", ())
+            if isinstance(n8n_manual_parameters, dict)
+            else ()
+        )
+        if unsupported_paths:
+            paths = ", ".join(str(path) for path in unsupported_paths)
+            raise NotImplementedError(
+                f"Параметры Loop Over Items требуют ручной реализации: {paths}"
+            )
         self.batch_size = batch_size
         self.reset = reset
+        # TODO: вручную реализовать настройки, перечисленные в n8n_manual_parameters,
+        # если исходная версия Loop отличается от выбранного fallback.
+        self.n8n_manual_parameters = n8n_manual_parameters
         self.done_items = []
         self.completed = False
         self.results = {}
