@@ -1,4 +1,9 @@
-"""Генерация узла Merge в режимах Append и Combine."""
+"""Генерация логики n8n Merge для режимов Append и Combine.
+
+Настройки проверяются во время конвертации, а generated-модуль содержит
+обычные Python-функции для объединения items и JSON-объектов. Исходные
+параметры n8n не разбираются повторно во время выполнения.
+"""
 
 from typing import Any
 
@@ -6,12 +11,21 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, int]:
-    """Сгенерировать функцию Merge Append или Combine и вернуть число входов."""
+    """Сгенерировать Merge Append/Combine и определить число входных портов.
+
+    Combine поддерживает сопоставление по позиции, все пары или заданные поля.
+    В generated-код встраиваются правила совпадений, конфликтов, join mode и
+    fuzzy-сравнения, которые были включены в исходном узле.
+
+    Returns:
+        Исходник модуля и число входов, которое должен проверить генератор графа.
+    """
     name = node["name"]
     p = node["parameters"]
     version = node.get("typeVersion")
     if not isinstance(version, (int, float)) or isinstance(version, bool) or version < 3 or version >= 4:
         raise WorkflowError(f"Узел {name}: поддерживается Merge версии 3")
+    # Append не требует правил сопоставления; Combine проверяется отдельной веткой.
     mode = p.get("mode", "append")
     if mode not in {"append", "combine"}:
         raise WorkflowError(f"Узел {name}: поддерживаются только Merge Append и Combine")
@@ -22,7 +36,7 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
         if set(p) - {"mode", "numberInputs", "options"} or p.get("options", {}):
             raise WorkflowError(f"Узел {name}: неподдерживаемые настройки Merge Append")
         return f'''def {function_name}(inputs):
-    """Собрать items всех входов в исходном порядке."""
+            """Добавить items всех входов подряд, сохраняя порядок портов."""
     result = []
     for input_index, items in enumerate(inputs):
         for item_index, item in enumerate(items):
@@ -142,13 +156,14 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
         output.append(combine([items[index] if index < len(items) else {{"json": {{}}}} for items in inputs]))
 '''
     preferred = int(resolution[len("preferInput"):]) - 1 if resolution.startswith("preferInput") else count - 1
+    # Вспомогательные функции пишутся рядом с узлом, чтобы generated-модуль был самодостаточным.
     source = f'''import json
 from copy import deepcopy
 from decimal import Decimal
 
 
 def same_value(left, right):
-    """Сравнить JSON-значения без неявного преобразования типов."""
+    """Сравнить JSON-значения строго и рекурсивно, не смешивая bool с числами."""
     if isinstance(left, (int, float)) and not isinstance(left, bool) and isinstance(right, (int, float)) and not isinstance(right, bool):
         return left == right
     if type(left) is not type(right):
@@ -161,7 +176,7 @@ def same_value(left, right):
 
 
 def field_value(data, name, literal):
-    """Получить вложенное поле и сообщить, существует ли путь."""
+    """Прочитать поле и отдельно сообщить, найден ли весь путь."""
     current = data
     for key in [name] if literal else name.split("."):
         if isinstance(current, dict) and key in current:
@@ -174,7 +189,7 @@ def field_value(data, name, literal):
 
 
 def js_number_string(value):
-    """Отформатировать число по правилам JavaScript для fuzzy-сравнения."""
+    """Форматировать число как JavaScript для сравнения с текстовым значением."""
     if isinstance(value, int) and not isinstance(value, bool):
         if abs(value) <= 9007199254740991:
             return str(value)
@@ -195,7 +210,7 @@ def js_number_string(value):
 
 
 def fuzzy_equal(left, right, left_exists, right_exists):
-    """Применить fuzzy-правила Merge к двум значениям и их наличию."""
+    """Сравнить два значения по нестрогим правилам Merge Combine."""
     if not left_exists and not right_exists:
         return True
     if not left_exists:
@@ -226,7 +241,7 @@ def fuzzy_equal(left, right, left_exists, right_exists):
 
 
 def match_field(left, right, first, second, literal, fuzzy):
-    """Сопоставить пару полей точным или fuzzy-способом."""
+    """Сравнить поля двух JSON-объектов по настроенным путям."""
     left_exists, left_value = field_value(left, first, literal)
     right_exists, right_value = field_value(right, second, literal)
     return (fuzzy_equal(left_value, right_value, left_exists, right_exists) if fuzzy
@@ -234,7 +249,7 @@ def match_field(left, right, first, second, literal, fuzzy):
 
 
 def merge_values(target, source, deep=True, skip_empty=False):
-    """Объединить JSON-значения рекурсивно или только на верхнем уровне."""
+    """Объединить вложенные значения с учётом глубины и пустых полей."""
     if deep and isinstance(target, dict) and isinstance(source, dict):
         result = deepcopy(target)
         for key, value in source.items():
@@ -255,7 +270,7 @@ def merge_values(target, source, deep=True, skip_empty=False):
 
 
 def combine(entries):
-    """Объединить JSON и binary данные входных items с учётом конфликтов."""
+    """Слить JSON и binary совпавших items с настроенным приоритетом полей."""
     data, binary = {{}}, {{}}
     preferred = {preferred}
     order = [index for index in range(len(entries)) if index != preferred] + [preferred]
@@ -280,7 +295,7 @@ def combine(entries):
 
 
 def {function_name}(inputs):
-    """Объединить входные items в режиме Combine."""
+    """Сопоставить items и вернуть пары, unmatched-элементы или все сочетания."""
     output = []
 {pairs}    return output
 '''

@@ -1,4 +1,9 @@
-"""Генерация простых функций для файловых узлов n8n."""
+"""Генерация Python-функций для операций n8n с binary и файлами.
+
+Поддерживаются Convert to File (текст), ZIP compression/decompression и
+Extract from File (текст/base64). Сгенерированные функции передают байты в
+стандартной структуре n8n item без промежуточной сериализации в base64.
+"""
 
 import keyword
 from typing import Any
@@ -7,7 +12,21 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def generate_file_node(node: dict[str, Any], function_name: str) -> str:
-    """Создать самостоятельный модуль для поддерживаемой операции с файлами."""
+    """Сгенерировать реализацию одной файловой операции workflow.
+
+    Ветвление здесь выполняется только во время конвертации. В generated-модуле
+    остаётся конкретная операция с уже встроенными именами полей и настройками.
+
+    Args:
+        node: Узел Convert to File, Compression или Extract from File.
+        function_name: Имя функции, которая будет вызвана из main.py.
+
+    Returns:
+        Текст Python-модуля для выбранной операции.
+
+    Raises:
+        WorkflowError: если тип, формат или параметр операции не поддерживается.
+    """
     name = node.get("name", "<без имени>")
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
         raise WorkflowError(f"Узел {name}: некорректное имя функции")
@@ -18,11 +37,16 @@ def generate_file_node(node: dict[str, Any], function_name: str) -> str:
         raise WorkflowError(f"Узел {name}: options должен быть объектом")
 
     def check(values: dict, allowed: set[str]) -> None:
-        """Отклонить настройки операции, семантика которых не реализована."""
+        """Проверить ключи конкретного словаря настроек.
+
+        Неизвестные ключи отклоняются, чтобы генератор не создавал функцию с
+        поведением, отличающимся от незамеченной настройки n8n.
+        """
         extra = set(values) - allowed
         if extra:
             raise WorkflowError(f"Узел {name}: неподдерживаемые параметры: {', '.join(sorted(extra))}")
 
+    # toText переносит исходный текст в реальное binary-поле с указанной кодировкой.
     if kind == "n8n-nodes-base.convertToFile" and p.get("operation") == "toText":
         check(p, {"operation", "sourceProperty", "options", "binaryPropertyName"})
         check(options, {"addBOM", "encoding", "fileName"})
@@ -37,7 +61,10 @@ def generate_file_node(node: dict[str, Any], function_name: str) -> str:
         output = p.get("binaryPropertyName", "data")
         bom_bytes = bytes.fromhex("efbbbf") if bom else b""
         return f'''def {function_name}(_items):
-    """Создать бинарное текстовое поле из заданного JSON-поля."""
+    """Закодировать JSON-текст в binary-файл каждого item.
+
+    Сохраняет остальные поля item и добавляет имя файла, MIME-тип и байты.
+    """
     result = []
     for item in _items:
         content = item["json"][{field!r}].encode({encoding!r})
@@ -47,6 +74,7 @@ def generate_file_node(node: dict[str, Any], function_name: str) -> str:
         result.append({{**item, "binary": binary}})
     return result
 '''
+    # Compression использует zipfile и сохраняет файлы как bytes в binary-полях.
     if kind == "n8n-nodes-base.compression":
         operation = p.get("operation", "decompress")
         if operation == "compress":
@@ -59,7 +87,10 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 
 def {function_name}(_items):
-    """Сжать binary-поля каждого item в ZIP-архив."""
+    """Упаковать все binary-файлы item в один ZIP-архив.
+
+    Внутренние имена берутся из fileName, архив добавляется рядом с исходными полями.
+    """
     result = []
     for item in _items:
         buffer = BytesIO()
@@ -80,7 +111,10 @@ from zipfile import ZipFile
 
 
 def {function_name}(_items):
-    """Извлечь файлы из ZIP и сохранить их байты в binary-полях."""
+    """Распаковать ZIP и создать binary-поле для каждого файла в архиве.
+
+    Каталоги пропускаются; файлы получают имена ``file_0``, ``file_1`` и далее.
+    """
     result = []
     for item in _items:
         binary = dict(item.get("binary", {{}}))
@@ -90,6 +124,7 @@ def {function_name}(_items):
         result.append({{**item, "binary": binary}})
     return result
 '''
+    # ExtractFromFile записывает результат операции в JSON, сохраняя binary только по настройке.
     if kind == "n8n-nodes-base.extractFromFile":
         op = p.get("operation")
         check(p, {"operation", "binaryPropertyName", "destinationKey", "options"})
@@ -104,7 +139,10 @@ def {function_name}(_items):
 
 
 def {function_name}(_items):
-    """Преобразовать бинарное содержимое в base64-текстовое поле."""
+    """Закодировать выбранные bytes в base64 и записать строку в JSON.
+
+    keepSource определяет, переносится ли исходный JSON и binary в результат.
+    """
     result = []
     for item in _items:
         value = base64.b64encode(item["binary"][{source!r}]["data"]).decode("ascii")
@@ -121,7 +159,10 @@ def {function_name}(_items):
             encoding = options.get("encoding", "utf8")
             strip = options.get("stripBOM", False)
             return f'''def {function_name}(_items):
-    """Декодировать бинарное поле в текст и добавить его в JSON."""
+    """Декодировать binary-поле указанной кодировкой и записать текст в JSON.
+
+    Если stripBOM включён, начальный символ BOM удаляется после декодирования.
+    """
     result = []
     for item in _items:
         text = item["binary"][{source!r}]["data"].decode({encoding!r})

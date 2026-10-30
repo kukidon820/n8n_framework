@@ -1,4 +1,9 @@
-"""Генерация прямых HTTP-вызовов для AI Agent с подключённой chat-моделью."""
+"""Генерация прямых HTTP-вызовов для AI Agent и chat-моделей.
+
+Если агенту достаточно обычного запроса к chat completions API, этот модуль
+создаёт функцию на ``httpx`` без LangChain или LangGraph. Endpoint, ключ,
+модель и параметры запроса попадают в config.py; prompt компилируется заранее.
+"""
 
 import keyword
 import re
@@ -21,7 +26,12 @@ _OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completion
 
 
 def _completion_url(model: dict[str, Any]) -> str:
-    """Получить URL Chat Completions из параметров модели или стандарт OpenRouter."""
+    """Найти endpoint модели или вывести стандартный endpoint OpenRouter.
+
+    Принимаются полный ``/chat/completions``, базовый ``/v1`` и адрес сервера.
+    Для неизвестного провайдера без endpoint возвращается пустая строка, которую
+    пользователь должен заполнить в generated config.py.
+    """
     parameters = model.get("parameters", {})
     options = parameters.get("options", {})
     for source, keys, is_base_url in (
@@ -47,9 +57,14 @@ def _completion_url(model: dict[str, Any]) -> str:
 
 
 def _payload_options(options: dict[str, Any], node_name: str) -> dict[str, Any]:
-    """Подготовить обычные параметры chat completion без списка провайдеров."""
+    """Оставить API-параметры модели и привести их имена к формату JSON API.
+
+    Настройки конвертера (таймаут, ключ, повторы и endpoint) исключаются из
+    payload. Неизвестные параметры модели передаются в запросе как snake_case.
+    """
     if options.get("stream", options.get("streaming", False)):
         raise WorkflowError(f"Узел {node_name}: потоковый ответ модели пока не поддерживается")
+    # В payload остаются только настройки, предназначенные API модели.
     payload = {}
     for key, value in options.items():
         if key in _INTERNAL_OPTIONS:
@@ -72,6 +87,15 @@ def generate_ai_agent(
     Конвертер не зависит от типа конкретного провайдера. Он использует endpoint
     из узла модели, а для моделей OpenAI-совместимого протокола без endpoint
     оставляет URL и credentials в конфигурации проекта.
+
+    Args:
+        agent: Узел AI Agent с system- и user-prompt.
+        model: Подключённый узел chat-модели с endpoint и параметрами API.
+        function_name: Имя функции в generated-модуле.
+        config_prefix: Префикс переменных модели в generated config.py.
+
+    Returns:
+        Исходник HTTP-функции, зависимости из prompt и значения конфигурации.
     """
     name = agent.get("name", "<без имени>")
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
@@ -100,6 +124,7 @@ def generate_ai_agent(
     if not isinstance(model_id, str):
         model_id = str(model_id) if model_id is not None else ""
 
+    # В n8n timeout задаётся миллисекундами, а HTTPX принимает секунды.
     timeout_ms = model_options.get("timeout", 180000)
     try:
         timeout_seconds = float(timeout_ms) / 1000
@@ -113,6 +138,7 @@ def generate_ai_agent(
         raise WorkflowError(f"Узел {model.get('name', '<без имени>')}: maxRetries модели должен быть целым числом не меньше нуля")
 
     payload_options = _payload_options(model_options, str(model.get("name", "AI model")))
+    # Секреты и endpoint хранятся отдельно от исходника функции.
     model_config = {
         "prefix": config_prefix,
         "node_name": model.get("name", "AI model"),
@@ -129,6 +155,7 @@ def generate_ai_agent(
         "max_retries": retries,
     }
 
+    # Expressions преобразуются во время конвертации, до записи generated-модуля.
     prompt = compile_expression(prompt_value, node=name, parameter="text")
     system = compile_expression(system_value, node=name, parameter="options.systemMessage")
     prefix = config_prefix
@@ -140,7 +167,12 @@ import config
 
 
 def {function_name}(items, results, execution):
-    """Вызвать подключённую chat-модель и вернуть ответы как n8n items."""
+    """Отправить prompt для каждого item и вернуть ответы модели.
+
+    Обязательные настройки читаются из config.py. HTTP-ошибки повторяются с
+    ограниченной задержкой, а структура ответа проверяется до извлечения текста.
+    """
+    # Не отправляем запрос, пока пользователь не задал обязательные параметры.
     if not config.{prefix}_API_URL:
         raise ValueError("Не задан {prefix}_API_URL в config.py")
     if not config.{prefix}_API_KEY:
@@ -149,6 +181,7 @@ def {function_name}(items, results, execution):
         raise ValueError("Не задан {prefix}_MODEL в config.py")
     output = []
     for item in items:
+        # Prompt и сообщения формируются отдельно для каждого входного item.
         payload = {{
             **config.{prefix}_OPTIONS,
             "model": config.{prefix}_MODEL,
@@ -159,6 +192,7 @@ def {function_name}(items, results, execution):
         }}
         headers = {{"Content-Type": "application/json"}}
         headers[config.{prefix}_API_KEY_HEADER] = f"{{config.{prefix}_API_KEY_PREFIX}}{{config.{prefix}_API_KEY}}"
+        # Количество попыток включает первый запрос; пауза растёт до 8 секунд.
         for attempt in range(config.{prefix}_MAX_RETRIES + 1):
             try:
                 response = httpx.post(

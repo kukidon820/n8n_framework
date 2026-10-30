@@ -1,3 +1,8 @@
+"""Проверки пользовательских команд Typer CLI.
+
+Проверяются справки, диагностики workflow и коды завершения команд.
+"""
+
 import json
 import subprocess
 import sys

@@ -1,3 +1,8 @@
+"""Проверки структуры generated Python-проекта.
+
+Проверяются связи узлов, настройки, состав файлов и ручной запуск результата.
+"""
+
 import os
 import subprocess
 import sys
@@ -276,6 +281,7 @@ def test_unimplemented_execution_settings_fail_before_writing(tmp_path, setting,
 
 def test_fanout_branches_use_same_source(tmp_path):
     def code(name, source):
+        """Создать Python Code Node с указанным именем и исходным кодом."""
         return {"id": name, "name": name, "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": source}}
     workflow = {"nodes": [
         code("Source", 'return [{"json": {"value": 3}}]'),

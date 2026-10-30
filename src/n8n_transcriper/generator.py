@@ -1,4 +1,10 @@
-"""Генерация самостоятельного проекта для поддерживаемого линейного workflow."""
+"""Компиляция проверенного workflow n8n в самостоятельный Python-проект.
+
+Модуль связывает конвертеры отдельных типов узлов, проверяет зависимости и
+порты, а затем собирает ``main.py``, конфигурацию и только нужные модули.
+Сгенерированная программа получает готовые вызовы функций и не читает workflow
+при запуске.
+"""
 
 import hashlib
 import json
@@ -47,13 +53,24 @@ SUPPORTED_NODE_TYPES = {
     "n8n-nodes-base.if",
     "n8n-nodes-base.switch",
 }
+# Узлы с AI-моделью обрабатываются как зависимость агента, а не как main-шаг.
 
 
 def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
-    """Проверить узлы независимо друг от друга и собрать их ошибки конвертации."""
+    """Независимо проверить настройки каждого узла для команды ``validate``.
+
+    Проверяется генерация модуля без построения исполняемой цепочки. Поэтому
+    команда может вывести несколько ошибок по разным узлам за один запуск.
+
+    Returns:
+        Пары ``(имя узла, сообщение)``. Если имя ещё нельзя определить, вместо
+        него возвращается ``None``.
+    """
     if not isinstance(workflow, dict):
         return []
 
+    # Модель определяется по auxiliary-связи: её настройки нужны AI Agent,
+    # но сама модель не становится отдельным вызовом в main.py.
     connections_data = workflow.get("connections", {})
     model_nodes: set[str] = set()
     agent_models: dict[str, str] = {}
@@ -84,6 +101,7 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
     }
 
     email_smtp_credentials: dict[str, str] = {}
+    # Обрабатываем узлы по одному, чтобы ошибка одного конвертера не скрывала остальные.
     for index, node in enumerate(nodes, start=1):
         if not isinstance(node, dict):
             continue
@@ -175,7 +193,11 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
 
 
 def _linked_item_nodes(value: Any) -> set[str]:
-    """Найти узлы, на которые выражения ссылаются через paired-item `.item`."""
+    """Найти имена узлов из выражений, использующих paired-item ``.item``.
+
+    Результат нужен generated-коду, чтобы включить только тогда, когда требуется,
+    служебные поля lineage и функции переноса связей между items.
+    """
     if isinstance(value, str):
         if not value.startswith("=") and "{{" not in value:
             return set()
@@ -188,10 +210,16 @@ def _linked_item_nodes(value: Any) -> set[str]:
 
 
 def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
-    """Создать читаемые и устойчивые имена модулей из имён и ID узлов."""
+    """Преобразовать имена n8n-узлов в уникальные имена Python-модулей.
+
+    Имена приводятся к нижнему snake_case; ключевые слова и запрещённые имена
+    Windows получают префикс. Если два имени совпали после нормализации, к ним
+    добавляется стабильный короткий хеш ID узла.
+    """
     reserved = {"logging", "uuid", "deepcopy", "run", "postgres", "config", "main", "__init__", "items", "results", "execution", "input_data"}
     reserved.update({"con", "prn", "aux", "nul"})
     reserved.update(f"{prefix}{i}" for prefix in ("com", "lpt") for i in range(1, 10))
+    # Сначала нормализуем имена, затем отдельно разрешаем совпадения.
     candidates = {}
     for name in nodes:
         stem = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:72] or "node"
@@ -211,7 +239,11 @@ def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
 
 
 def _project_toml(dependencies: set[str]) -> str:
-    """Описать зависимости generated-проекта в формате uv/PEP 621."""
+    """Собрать минимальный ``pyproject.toml`` с зависимостями generated-проекта.
+
+    Зависимости сортируются для стабильного результата, а generated-проект
+    запускается без установки самого каталога как Python-пакета.
+    """
     dependency_lines = ",\n".join(f"    {json.dumps(value, ensure_ascii=False)}" for value in sorted(dependencies))
     dependency_block = f"[\n{dependency_lines}\n]" if dependency_lines else "[]"
     return (
@@ -233,7 +265,21 @@ def _loop_layout(
     base_order: list[str],
     feedback_edges: list[Any],
 ) -> dict[str, Any] | None:
-    """Проверить граф одного Loop и разложить его на вход, тело и done-ветвь."""
+    """Проверить поддерживаемую схему Loop и разделить граф на три области.
+
+    Сейчас один workflow может содержать один Loop с одним начальным входом и
+    одной обратной связью. Возвращаемая структура хранит узлы до цикла, узлы
+    тела, done-ветвь и порядок, в котором их нужно сгенерировать.
+
+    Returns:
+        Сведения о цикле или ``None``, если в графе нет Loop Over Items.
+
+    Raises:
+        WorkflowError: если у цикла нет единственного входа/обратной связи,
+            ветви пересекаются или в workflow есть узлы вне этих областей.
+    """
+    # Ограничение на один цикл позволяет сгенерировать понятный вложенный блок
+    # в main.py без runtime-планировщика и универсального движка графов.
     loop_names = [
         name for name in main_nodes
         if nodes[name]["type"] == "n8n-nodes-base.splitInBatches"
@@ -274,6 +320,7 @@ def _loop_layout(
     )
 
     def reachable(starts: list[Any]) -> set[str]:
+        """Найти все узлы, достижимые из выбранного выхода Loop."""
         visited: set[str] = set()
         pending = [edge.target for edge in starts]
         while pending:
@@ -284,6 +331,8 @@ def _loop_layout(
             pending.extend(edge.target for edge in outgoing.get(current, []))
         return visited
 
+    # Две ветви должны быть независимыми: тело запускается на каждой итерации,
+    # а done-ветвь — только после завершения цикла.
     body_nodes = reachable(loop_edges)
     done_nodes = reachable(done_edges)
     overlap = body_nodes & done_nodes
@@ -345,15 +394,32 @@ def _loop_layout(
 
 
 def generate_project(workflow: dict[str, Any], output: Path | None = None) -> dict[str, str]:
-    """Сгенерировать исполняемый Python-проект из проверенного workflow.
+    """Скомпилировать workflow в набор файлов самостоятельного Python-проекта.
 
-    Все expressions разрешаются здесь, а не при запуске результата. Если
-    настройка или граф неоднозначны, ошибка возникает до создания файлов.
+    Функция сначала проверяет структуру графа и поддерживаемость узлов, затем
+    генерирует модуль каждого узла и собирает вызовы в ``main.py``. Все
+    expressions разбираются на этом этапе; исходный JSON не нужен при запуске.
+
+    Args:
+        workflow: Словарь, загруженный из JSON n8n.
+        output: Необязательная пустая папка для записи файлов. Если не задана,
+            содержимое файлов возвращается только в памяти.
+
+    Returns:
+        Словарь ``относительный путь -> текст файла``. Его используют CLI,
+        проверка синтаксиса и тесты generated-проекта.
+
+    Raises:
+        WorkflowError: если граф или параметры не поддерживаются либо папка
+            назначения уже содержит файлы.
     """
+    # Разделяем вспомогательные AI-связи и обычные main-рёбра до сортировки графа.
     edges = connections(workflow)
     nodes = {node["name"]: node for node in workflow["nodes"]}
     if not nodes:
         raise WorkflowError("Workflow не содержит узлов")
+    # AI-модель принадлежит агенту: запоминаем её имя, чтобы передать конфигурацию
+    # прямо в модуль агента и исключить модель из последовательности узлов.
     models: dict[str, str] = {}
     auxiliary = [edge for edge in edges if edge.channel != "main"]
     for edge in auxiliary:
@@ -369,6 +435,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     if any(edge.target_type != "main" or edge.source in model_names or edge.target in model_names or (edge.input != 0 and nodes[edge.target]["type"] != "n8n-nodes-base.merge") for edge in all_main_edges):
         raise WorkflowError("Неподдерживаемые основные соединения")
     main_nodes = set(nodes) - model_names
+    # Обратное ребро Loop не участвует в топологической сортировке, но остаётся
+    # в описании цикла для формирования реального for-блока в main.py.
     feedback_edges = loop_feedback_edges(workflow)
     main_edges = [edge for edge in all_main_edges if edge not in feedback_edges]
     base_order = [name for name in execution_order(workflow) if name not in model_names]
@@ -399,6 +467,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     )
     linked_names = set().union(*(_linked_item_nodes(node.get("parameters", {})) for node in nodes.values()), set())
     linked_items = bool(linked_names)
+    # Родители нужны для входных аргументов узлов и проверки доступности expressions.
     parents = {name: sorted((edge for edge in main_edges if edge.target == name), key=lambda edge: edge.input) for name in main_nodes}
     # Именованные ссылки разрешены только на узлы, достижимые по main-связям.
     ancestors = {}
@@ -425,6 +494,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     http_credentials: set[str] = set()
     http_credential_descriptions: dict[str, set[str]] = {}
     postgres_credential = None
+    # Для каждого узла создаём отдельный модуль; ниже формируется его вызов в main.py.
     for index, name in enumerate(order):
         node = nodes[name]
         kind = node["type"]
@@ -440,6 +510,12 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             raise WorkflowError(f"Узел {name}: настройка onError пока не поддерживается")
         if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
             raise WorkflowError(f"Узел {name}: настройка retryOnFail пока не поддерживается")
+        # Этот комментарий попадёт в generated main.py перед блоком вызова узла.
+        # Убираем переводы строк, чтобы имя из JSON не могло изменить структуру файла.
+        node_comment = name.replace("\r", " ").replace("\n", " ")
+        kind_comment = kind.replace("\r", " ").replace("\n", " ")
+        calls.append(f"    # Узел n8n «{node_comment}» ({kind_comment})")
+        # Триггеры намеренно не запускаются: сгенерированный проект вызывается вручную.
         trigger_name = kind.rsplit(".", 1)[-1].lower()
         if trigger_name.endswith("trigger") or kind == "n8n-nodes-base.webhook":
             if index != 0:
@@ -448,6 +524,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             if branching:
                 calls.append(f"    {aliases[name]} = [items]")
             continue
+        # Конвертер узла возвращает исходник функции и зависимости её параметров.
         stem = module_names[name]
         function = "run_node"
         if kind == "n8n-nodes-base.code":
@@ -579,6 +656,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             arguments = "items, results, execution"
         else:
             raise WorkflowError(f"Узел {name}: неподдерживаемый тип {kind}")
+        # Сохраняем исходник модуля и регистрируем импорт для явного вызова из main.py.
         files[f"{folder}/{stem}.py"] = source
         files[f"{folder}/__init__.py"] = ""
         if kind == "n8n-nodes-base.splitInBatches":
@@ -594,6 +672,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                 fanout = sum(1 for item in main_edges if item.source == edge.source and item.output == edge.output) > 1
                 calls.append(f"    items.extend({'deepcopy(' + value + ')' if fanout else value})")
             calls.extend([
+                # Экземпляр хранит batchSize/reset конкретного Loop из workflow.
                 f"    {loop_state_name} = Loop(batch_size={loop_settings.batch_size}, reset={loop_settings.reset!r})",
                 f"    {aliases[name]} = [[] for _ in range({loop_settings.output_count})]",
                 f"    for loop_batch in {loop_state_name}.iterate(items):",
@@ -610,6 +689,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             continue
         else:
             imports.append(f"from {folder}.{stem} import {function} as {stem}")
+        # Для графа с ветвлениями сохраняем выходы каждого узла отдельно;
+        # линейному workflow достаточно переменной items.
         if branching:
             if kind == "n8n-nodes-base.merge":
                 values = [f'deepcopy({aliases[e.source]}[{e.output}])' for e in parents[name]]
@@ -731,7 +812,11 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     else:
         return_code = ' + '.join(f'{aliases[name]}[0]' for name in terminal) or '[]' if branching else 'items'
     lineage_helpers = ('LINKED_ITEM_NODES = ' + repr(tuple(sorted(linked_names))) + '\n\n\n' + '''def _link_lineage(source_items, output_items, node_name, index_offset=0):
-    """Перенести paired-item lineage через узел с выходными индексами."""
+    """Передать выходным items связь с соответствующими входными items.
+
+    pairedItem в результате имеет приоритет. Если его нет, связь определяется
+    только для однозначных случаев: один вход или одинаковое число входов и выходов.
+    """
     for output_index, output_item in enumerate(output_items):
         paired = output_item.get("pairedItem")
         if isinstance(paired, dict):
@@ -755,7 +840,11 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
 
 
 def _link_outputs(source_items, outputs, node_name, index_offset=0):
-    """Сохранить связь исходных items с выходами IF или Switch."""
+    """Сохранить paired-item lineage при распределении items по портам IF/Switch.
+
+    Выходы нумеруются в общем порядке, а ``index_offset`` учитывает прошлые
+    итерации Loop, чтобы ссылки ``.item`` указывали на правильный элемент.
+    """
     by_identity = {id(item): index for index, item in enumerate(source_items)}
     linked_outputs = [[] for _ in outputs]
     flattened = []
@@ -774,7 +863,11 @@ def _link_outputs(source_items, outputs, node_name, index_offset=0):
 
 
 def _tag_merge_inputs(inputs):
-    """Пометить входные items индексами для восстановления lineage после Merge."""
+    """Временно отметить источник каждого item перед выполнением Merge.
+
+    Метки нужны только внутри generated main.py: конвертер Merge возвращает их
+    вместе с результатом, чтобы затем восстановить родительские ссылки.
+    """
     for input_index, items in enumerate(inputs):
         for item_index, item in enumerate(items):
             item["__transcriper_input"] = input_index
@@ -783,7 +876,12 @@ def _tag_merge_inputs(inputs):
 
 
 def _link_merge(inputs, output_items, node_name, index_offset=0):
-    """Восстановить происхождение выходов Merge и проверить неоднозначность."""
+    """Восстановить родительские связи для результатов Merge.
+
+    Если объединены разные items одного предка, его paired-item связь удаляется.
+    Когда на такой неоднозначный предок ссылается expression ``.item``, выполнение
+    останавливается с ошибкой вместо выбора произвольного элемента.
+    """
     for output_index, item in enumerate(output_items):
         sources = item.pop("__transcriper_sources", None)
         if sources is None and "__transcriper_input" in item:
@@ -815,7 +913,7 @@ def _link_merge(inputs, output_items, node_name, index_offset=0):
 
 
 def _clean_items(items):
-    """Удалить служебные поля lineage из результата публичной функции run()."""
+    """Удалить внутренние индексы, не предназначенные вызывающему коду."""
     for item in items:
         item.pop("_n8n_lineage", None)
         item.pop("__transcriper_input", None)
@@ -824,7 +922,7 @@ def _clean_items(items):
     return items
 ''') if linked_items else ""
     files["main.py"] = ('"""Точка ручного запуска сгенерированного workflow."""\n\nimport logging\nimport sys\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
-        '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    """Выполнить workflow; input_data — список n8n items."""\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
+        '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    """Вручную выполнить сгенерированную цепочку узлов.\n\n    Args:\n        input_data: Необязательный список n8n items вида {"json": {...}}.\n            Если аргумент не задан, workflow получает один пустой item.\n\n    Returns:\n        Items терминальных узлов с удалёнными служебными полями lineage.\n    """\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
         '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)\n    run()\n')
     files["run.bat"] = (
         "@echo off\n"
@@ -850,7 +948,7 @@ def _clean_items(items):
         "fi\n"
         'exit "$workflow_exit_code"\n'
     )
-    config = '"""Настройки авторизации через переменные окружения."""\n\nimport os\n'
+    config = '"""Настройки авторизации generated-проекта.\n\nКаждое значение читается из переменной окружения; реальные секреты не хранятся\nв workflow и не записываются в исходники конвертера.\n"""\n\nimport os\n'
     for prefix, model_config in sorted(ai_model_configs.items()):
         api_url = model_config["api_url"]
         model_id = model_config["model"]
@@ -951,12 +1049,14 @@ def _clean_items(items):
     files["conversion_report.md"] = (f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. '
         f'Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n\n'
         f'Настройки авторизации: {credentials}.\n')
+    # Без output возвращаем файловый снимок для validate и тестов; иначе пишем его на диск.
     if output is None:
         return files
 
     output = Path(output)
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise WorkflowError(f"Каталог назначения не пуст: {output}")
+    # Создаём только нужные workflow файлы и сохраняем переносимые окончания строк.
     for path, content in files.items():
         target = output / path
         target.parent.mkdir(parents=True, exist_ok=True)

@@ -1,3 +1,8 @@
+"""Проверки порядка выполнения узлов n8n.
+
+Покрываются connections, циклы и ошибки графа, мешающие генерации.
+"""
+
 import pytest
 
 from n8n_transcriper.graph import connections, execution_order
@@ -5,10 +10,12 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def node(name):
+    """Создать узел с минимальными полями, нужными построителю графа."""
     return {"id": name, "name": name, "type": "test", "parameters": {}}
 
 
 def link(name, index=0, kind="main"):
+    """Создать ссылку графа с каналом и номером входного порта."""
     return {"node": name, "type": kind, "index": index}
 
 

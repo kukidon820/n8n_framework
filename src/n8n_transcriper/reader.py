@@ -1,4 +1,8 @@
-"""Чтение JSON-файлов n8n и проверка их структуры."""
+"""Чтение и структурная проверка входных workflow n8n.
+
+Здесь проверяются только форма JSON, обязательные поля узлов и ссылки между
+узлами. Поддержку конкретных типов узлов и их параметров проверяют генераторы.
+"""
 
 import errno
 import json
@@ -7,11 +11,22 @@ from typing import Any
 
 
 class WorkflowError(ValueError):
-    """Ошибка чтения или проверки workflow."""
+    """Понятная пользователю ошибка чтения, структуры или генерации workflow."""
 
 
 def load_workflow(path: str | Path) -> Any:
-    """Прочитать JSON workflow, не проверяя его структуру."""
+    """Загрузить JSON из файла без проверки полей workflow.
+
+    ``utf-8-sig`` принимает как обычный UTF-8, так и файл с BOM. Ошибки
+    декодирования и доступа превращаются в ``WorkflowError`` с путём и причиной.
+
+    Args:
+        path: Путь к JSON-файлу workflow.
+
+    Returns:
+        Корневое значение JSON. Тип проверяется отдельно функцией
+        ``validate_workflow``.
+    """
     workflow_path = Path(path)
     try:
         with workflow_path.open(encoding="utf-8-sig") as source:
@@ -39,14 +54,23 @@ def load_workflow(path: str | Path) -> Any:
 
 
 def read_workflow(path: str | Path) -> dict[str, Any]:
-    """Прочитать UTF-8 JSON и проверить структуру workflow."""
+    """Загрузить файл и сразу проверить обязательную структуру workflow.
+
+    Это основной вход для команд ``convert`` и ``inspect``: вызывающий код
+    получает словарь только после успешной структурной проверки.
+    """
     workflow = load_workflow(path)
     validate_workflow(workflow)
     return workflow
 
 
 def validate_workflow_issues(workflow: Any) -> list[str]:
-    """Собрать все обнаруживаемые ошибки структуры workflow."""
+    """Собрать структурные ошибки, не останавливаясь на первой.
+
+    Проверяются типы ``nodes`` и ``connections``, уникальность ID и имён,
+    обязательные поля узлов, форма выходов и существование целевых узлов.
+    Функция ничего не исправляет и возвращает список диагностик для CLI.
+    """
     if not isinstance(workflow, dict):
         return ["Корневое значение workflow должно быть JSON-объектом."]
 
@@ -58,6 +82,7 @@ def validate_workflow_issues(workflow: Any) -> list[str]:
     if not isinstance(connections, dict):
         issues.append("Поле «connections» должно быть объектом.")
 
+    # Сначала проверяем узлы и собираем допустимые имена и ID для проверки связей.
     names: set[str] = set()
     ids: set[str] = set()
     if isinstance(nodes, list):
@@ -94,6 +119,7 @@ def validate_workflow_issues(workflow: Any) -> list[str]:
                 issues.append(f"{node_label}: поле «parameters» должно быть объектом.")
                 node_is_valid = False
 
+    # Затем проверяем каждый путь соединения и указываем его точное место в JSON.
     if isinstance(connections, dict):
         for source, channels in connections.items():
             if not isinstance(source, str) or not source:
@@ -146,7 +172,11 @@ def validate_workflow_issues(workflow: Any) -> list[str]:
 
 
 def validate_workflow(workflow: Any) -> None:
-    """Проверить структуру и сообщить обо всех найденных ошибках."""
+    """Проверить workflow и выбросить одну ошибку со всеми нарушениями.
+
+    Используется перед построением графа, когда дальнейшая работа невозможна
+    без корректных списков узлов и соединений.
+    """
     issues = validate_workflow_issues(workflow)
     if issues:
         details = "\n".join(f"- {issue}" for issue in issues)
@@ -154,7 +184,11 @@ def validate_workflow(workflow: Any) -> None:
 
 
 def _json_error_reason(message: str) -> str:
-    """Перевести распространённые сообщения JSON-декодера на русский."""
+    """Перевести частые ошибки стандартного JSON-декодера на русский.
+
+    Номер строки и столбца добавляет вызывающий код; здесь преобразуется только
+    описание причины. Для неизвестного сообщения используется общий перевод.
+    """
     if message.startswith("Expecting property name"):
         return "имя свойства должно быть заключено в двойные кавычки"
     if message.startswith("Expecting ':'"):

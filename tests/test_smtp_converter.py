@@ -1,3 +1,8 @@
+"""Проверки отправки почты через SMTP и Gmail API.
+
+Проверяются MIME-сообщения, адресаты и вложения без отправки реальных писем.
+"""
+
 import base64
 import sys
 from email.message import EmailMessage
@@ -15,6 +20,7 @@ from n8n_transcriper.generator import generate_project
 
 
 def gmail_send_node():
+    """Сформировать Gmail Send node с тестовым получателем и binary-вложением."""
     return {
         "id": "send-mail",
         "name": "HTTP - Send email with ZIP",
@@ -33,6 +39,7 @@ def gmail_send_node():
 
 
 def email_send_node():
+    """Сформировать emailSend node с SMTP credentials и полями сообщения."""
     return {
         "id": "email-send-1",
         "name": "Send Email",

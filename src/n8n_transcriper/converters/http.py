@@ -1,4 +1,9 @@
-"""Генерация HTTP-функций для поддерживаемых настроек n8n."""
+"""Генерация отдельных HTTP-функций для узлов n8n HTTP Request.
+
+На этапе конвертации проверяются метод, тело, авторизация, response format,
+retry, batching, pagination и транспортные параметры. Generated-модуль содержит
+конкретный запрос на httpx и не читает исходные настройки n8n во время запуска.
+"""
 
 import hashlib
 import keyword
@@ -12,7 +17,13 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def http_secret_header_fields(node: dict[str, Any]) -> dict[int, str]:
-    """Вернуть config-переменные для статических значений секретных HTTP-заголовков."""
+    """Построить config-имена для статических чувствительных заголовков.
+
+    Значения Authorization, API key, token, password и похожих заголовков
+    заменяются переменными окружения. Expressions не извлекаются, поскольку их
+    значение вычисляется из данных workflow, а не является встроенным секретом.
+    Ключ результата — индекс поля заголовка в исходном списке.
+    """
     params = node.get("parameters", {})
     group = params.get("headerParameters", {}) if isinstance(params, dict) else {}
     entries = group.get("parameters", []) if isinstance(group, dict) else []
@@ -33,6 +44,8 @@ def http_secret_header_fields(node: dict[str, Any]) -> dict[int, str]:
         sensitive_parts = {
             "authorization", "auth", "token", "secret", "password", "credential", "credentials", "cookie", "apikey",
         }
+        # Секрет определяется по целым словам, чтобы, например, X-Authorization-Info
+        # не был принят за обычное публичное значение.
         sensitive = bool(parts & sensitive_parts) or {"api", "key"} <= parts
         if not sensitive or value.startswith("=") or "{{" in value:
             continue
@@ -43,7 +56,11 @@ def http_secret_header_fields(node: dict[str, Any]) -> dict[int, str]:
 
 
 def http_credential_fields(node: dict[str, Any]) -> dict[str, str]:
-    """Получить имена переменных для generic credentials без самих секретов."""
+    """Вернуть config-имена полей HTTP credentials, не читая сами секреты.
+
+    Каждое имя строится из типа и ID credentials. Поэтому одинаковые credentials
+    используют те же переменные, а разные записи не конфликтуют в config.py.
+    """
     params = node.get("parameters", {})
     if params.get("authentication", "none") != "genericCredentialType":
         return {}
@@ -63,7 +80,23 @@ def http_credential_fields(node: dict[str, Any]) -> dict[str, str]:
 
 
 def generate_http_node(node: dict[str, Any], function_name: str) -> str:
-    """Создать модуль HTTP-запроса; неизвестные настройки отклоняются."""
+    """Сгенерировать функцию HTTP Request с конкретными настройками узла.
+
+    Параметры URL, headers, query, body, auth и ответа преобразуются в вызов
+    ``httpx.Client``. Поддерживаемые pagination и retry генерируются как явные
+    циклы Python. Неизвестные параметры отклоняются, а секреты выносятся в config.
+
+    Args:
+        node: Исходный HTTP Request из workflow.
+        function_name: Имя generated-функции узла.
+
+    Returns:
+        Полный текст самостоятельного Python-модуля.
+
+    Raises:
+        WorkflowError: если не поддерживаются параметры, auth, body, pagination
+            или настройки ответа данного узла.
+    """
     name = node.get("name", "<без имени>")
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
         raise WorkflowError(f"Узел {name}: некорректное имя функции")
@@ -72,6 +105,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     unknown = set(p) - allowed
     if unknown:
         raise WorkflowError(f"Узел {name}: неподдерживаемые HTTP-параметры: {', '.join(sorted(unknown))}")
+    # Сначала разбираем способ авторизации: от него зависят config-поля и обработка redirect.
     auth = p.get("authentication", "none")
     gmail = auth == "predefinedCredentialType" and p.get("nodeCredentialType") == "gmailOAuth2"
     credential_fields = http_credential_fields(node)
@@ -87,6 +121,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     method = p.get("method", "GET")
     if not isinstance(method, str) or not method.isalpha():
         raise WorkflowError(f"Узел {name}: некорректный HTTP-метод")
+    # Проверяем все transport options до сборки исходника запроса.
     options = p.get("options", {})
     if not isinstance(options, dict) or set(options) - {"timeout", "response", "batching", "allowUnauthorizedCerts", "redirect", "proxy", "lowercaseHeaders", "webdavMethods", "pagination", "sendCredentialsOnCrossOriginRedirect"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые HTTP options")
@@ -137,6 +172,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     response_format = response.get("responseFormat", "autodetect")
     if response_format not in ("json", "text", "file", "autodetect"):
         raise WorkflowError(f"Узел {name}: неподдерживаемый формат ответа {response_format!r}")
+    # Pagination кодируется отдельным циклом; неподдерживаемые условия завершения отклоняются.
     page_settings = options.get("pagination")
     page_config = None
     if page_settings is not None:
@@ -191,13 +227,17 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         raise WorkflowError(f"Узел {name}: некорректные настройки повторов")
 
     def expression(value: Any, parameter: str) -> str:
-        """Скомпилировать значение-параметр и привязать ошибку к его имени."""
+        """Преобразовать expression или сохранить значение как Python-литерал."""
         if isinstance(value, str):
             return compile_expression(value, node=name, parameter=parameter).code
         return repr(value)
 
     def pairs(enabled: str, field: str) -> str:
-        """Собрать словарь query-параметров или заголовков из настроек узла."""
+        """Собрать Python-словарь query-параметров либо заголовков.
+
+        Для чувствительного заголовка вместо исходного значения подставляется
+        переменная config.py, остальные значения компилируются как expressions.
+        """
         if not p.get(enabled, False):
             if field in p:
                 raise WorkflowError(f"Узел {name}: {field} задан без {enabled}")
@@ -214,11 +254,13 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
             entries.append(f"{pair['name']!r}: {value}")
         return "{" + ", ".join(entries) + "}"
 
+    # Query и headers представлены в generated-коде обычными словарями Python.
     params = pairs("sendQuery", "queryParameters")
     headers = pairs("sendHeaders", "headerParameters")
     url_code = expression(url, "url")
     body = ""
     body_argument = ""
+    # Тело запроса собирается в соответствии с выбранным JSON/form/multipart/raw/binary режимом.
     if p.get("sendBody", False):
         content_type = p.get("contentType", "json")
         mode = p.get("specifyBody", "keypair")
@@ -304,6 +346,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
             raise WorkflowError(f"Узел {name}: неподдерживаемый формат тела {content_type!r}")
     elif set(p) & {"jsonBody", "specifyBody", "contentType", "bodyParameters", "body", "rawContentType", "inputDataFieldName"}:
         raise WorkflowError(f"Узел {name}: тело запроса задано без sendBody")
+    # OAuth Gmail получает короткоживущий access token непосредственно перед запросом.
     auth_code = '''        if not all((config.GMAIL_CLIENT_ID, config.GMAIL_CLIENT_SECRET, config.GMAIL_REFRESH_TOKEN)):
             raise ValueError("Не заданы Gmail OAuth2 credentials")
         token_response = httpx.post("https://oauth2.googleapis.com/token", data={
@@ -325,11 +368,13 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     query_auth_code = ""
     if generic_type == "httpQueryAuth":
         query_auth_code = f'        page_params[config.{credential_fields["NAME"]}] = config.{credential_fields["VALUE"]}\n'
+    # Каждый response format преобразуется в n8n items, сохраняя bytes для файлов.
     json_output = 'value = response.json() if response.content.strip() else {}\n            values = value if isinstance(value, list) else [value]\n            result.extend({"json": value if value is not None else {}} for value in values)'
     text_output = f'result.append({{"json": {{{output_property!r}: response.text}}}})'
     file_output = f'''binary = dict(item.get("binary", {{}}))
             binary[{output_property!r}] = {{"data": response.content, "mimeType": response.headers.get("content-type", "application/octet-stream")}}
             result.append({{"json": item.get("json", {{}}), "binary": binary}})'''
+    # fullResponse добавляет status и headers, не меняя обработку тела ответа.
     if full_response:
         metadata = '{"headers": dict(response.headers), "statusCode": response.status_code, "statusMessage": response.reason_phrase}'
         json_output = f'body_value = response.json() if response.content.strip() else {{}}\n            result.append({{"json": {{**{metadata}, "body": body_value}}}})'
@@ -338,6 +383,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
             binary[{output_property!r}] = {{"data": response.content, "mimeType": response.headers.get("content-type", "application/octet-stream")}}
             result.append({{"json": {metadata}, "binary": binary}})'''
     binary_types = ('image/', 'audio/', 'video/', 'application/octet-stream', 'application/gzip', 'application/zip', 'application/vnd.rar', 'application/epub+zip', 'application/x-bzip', 'application/x-bzip2', 'application/x-cdf', 'application/vnd.amazon.ebook', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.ms-fontobject', 'application/vnd.oasis.opendocument.presentation', 'application/pdf', 'application/x-tar', 'application/vnd.visio', 'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/x-7z-compressed')
+    # При autodetect content-type определяет JSON, binary file или текст.
     if response_format == "autodetect":
         detect = f'''        content_type = response.headers.get("content-type", "")
         response_format = "json" if "application/json" in content_type else ("file" if any(kind in content_type for kind in {binary_types!r}) else "text")
@@ -351,6 +397,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         client_options += f', proxy={proxy!r}'
     if generic_type == "httpBasicAuth":
         client_options += f', auth=(config.{credential_fields["USERNAME"]}, config.{credential_fields["PASSWORD"]})'
+    # При cross-origin redirect credentials снимаются, если узел явно не разрешил передачу.
     redirect_guard = ""
     if follow and (gmail or credential_fields or secret_header_fields) and not send_credentials_cross_origin:
         headers_to_strip = []
@@ -377,6 +424,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         client_options += ', event_hooks={"request": [strip_credentials_on_redirect]}'
     throttle = f'        if item_index and item_index % {batch_size} == 0:\n            time.sleep({batch_interval / 1000!r})\n' if batch_size > 0 and batch_interval > 0 else ''
     lowercase = '        headers = {key.lower(): value for key, value in headers.items()}\n' if options.get("lowercaseHeaders", True) else ''
+    # Один request block переиспользуется обычным вызовом и обеими pagination-стратегиями.
     request_block = f'''{query_auth_code}        with httpx.Client({client_options}) as client:
             for attempt in range({tries}):
                 try:
@@ -432,7 +480,11 @@ import httpx
 
 
 def {function_name}(items, results, execution):
-    """Выполнить HTTP-запрос для каждого входного item."""
+    """Выполнить сгенерированный запрос и вернуть результат для каждого item.
+
+    Внутри функции применяются настроенные headers/body, повторы и pagination.
+    JSON, текст и бинарный ответ переводятся в структуру n8n item.
+    """
 {secret_header_checks}    result = []
     for item_index, item in enumerate(items):
 {throttle}

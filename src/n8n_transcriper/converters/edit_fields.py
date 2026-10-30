@@ -1,4 +1,8 @@
-"""Генерация ручных назначений Edit Fields для n8n Set 3.3+."""
+"""Генерация назначений и выборки полей для n8n Edit Fields / Set.
+
+Значения expressions преобразуются заранее, а generated-функция применяет их
+к каждому входному item. Поля JSON и binary сохраняются согласно параметрам узла.
+"""
 
 import keyword
 from typing import Any
@@ -8,7 +12,15 @@ from n8n_transcriper.reader import WorkflowError
 
 
 def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
-    """Создать модуль узла и вернуть имена узлов, на которые он ссылается."""
+    """Сгенерировать функцию ручного Edit Fields и собрать ссылки на другие узлы.
+
+    Поддерживаются версии Set 3.3–3.5, режим manual, типизированные назначения
+    и статический выбор JSON-полей. Неизвестные настройки отклоняются, чтобы
+    generated-код не потерял незамеченную семантику исходного узла.
+
+    Returns:
+        Исходник модуля и имена узлов, используемых в expressions.
+    """
     name = node.get("name", "<без имени>")
     p = node.get("parameters", {})
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
@@ -24,6 +36,7 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
     options = p.get("options", {})
     if not isinstance(include, bool) or not isinstance(options, dict) or set(options) - {"stripBinary", "includeBinary", "dotNotation"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые настройки Edit Fields")
+    # Выбор полей описывает исходный JSON; includeOtherFields решает, сохранять ли его.
     selection = p.get("include", "all") if include else "none"
     selection_field = "includeFields" if selection == "selected" else "excludeFields" if selection == "except" else None
     fields_text = p.get(selection_field, "") if selection_field else ""
@@ -49,6 +62,7 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
         raise WorkflowError(f"Узел {name}: некорректные assignments")
     lines = []
     dependencies: set[str] = set()
+    # Компилируем каждое назначение отдельно и переносим его в тело функции узла.
     for assignment in assignments.get("assignments", []):
         if not isinstance(assignment, dict) or set(assignment) - {"id", "name", "value", "type"}:
             raise WorkflowError(f"Узел {name}: некорректное назначение")
@@ -67,7 +81,11 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
             code = repr(value)
         lines.extend([f"        value = convert_value({code}, {field_type!r})", f"        data[{field!r}] = value"])
     helper = '''def convert_value(value, field_type):
-    """Преобразовать значение assignment к выбранному типу поля."""
+    """Привести значение поля к типу, выбранному в Edit Fields.
+
+    JSON-объекты и массивы разбираются из строки при необходимости; несовместимые
+    значения вызывают ошибку, а не преобразуются молча.
+    """
     if value is None:
         return None
     if field_type == "string":

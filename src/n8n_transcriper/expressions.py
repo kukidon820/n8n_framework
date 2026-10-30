@@ -1,4 +1,9 @@
-"""Преобразование простых выражений n8n в исходный код Python."""
+"""Компиляция поддерживаемых n8n expressions в обычные выражения Python.
+
+Парсер работает только во время конвертации. Он не использует ``eval`` и не
+оставляет в generated-проекте интерпретатор JavaScript или исходный workflow.
+Неподдерживаемый синтаксис завершается диагностикой с именем узла и параметра.
+"""
 
 import ast
 import re
@@ -9,7 +14,12 @@ from n8n_transcriper.reader import WorkflowError
 
 @dataclass(frozen=True)
 class Expression:
-    """Скомпилированное Python-выражение и имена узлов, от которых оно зависит."""
+    """Результат компиляции одного expression.
+
+    Attributes:
+        code: Безопасный фрагмент Python, который генератор вставит в функцию узла.
+        dependencies: Имена предыдущих узлов, чьи результаты нужны этому фрагменту.
+    """
 
     code: str
     dependencies: frozenset[str]
@@ -21,13 +31,19 @@ _TEMPLATE = re.compile(r"{{\s*(.*?)\s*}}", re.DOTALL)
 
 
 def _split_top_level(value: str, delimiter: str) -> list[str]:
-    """Разделить строку, не затрагивая разделители внутри кавычек и скобок."""
+    """Разбить строку по разделителю верхнего уровня.
+
+    Разделители внутри строк, словарей, списков и вызовов функций остаются
+    частью значения. Это позволяет разбирать JSON-объекты и аргументы функций,
+    не разбивая вложенные выражения по запятым или двоеточиям.
+    """
     parts = []
     start = 0
     stack = []
     quote = None
     escaped = False
     pairs = {')': '(', ']': '[', '}': '{'}
+    # Сканер хранит открытые скобки и состояние строк, чтобы найти только внешние разделители.
     for index, char in enumerate(value):
         if quote:
             if escaped:
@@ -57,7 +73,12 @@ def _split_top_level(value: str, delimiter: str) -> list[str]:
 
 
 def _json_stringify(value: str) -> Expression:
-    """Скомпилировать JSON.stringify с обычным значением и безопасными настройками отступа."""
+    """Преобразовать поддерживаемую форму ``JSON.stringify`` в ``json.dumps``.
+
+    Принимаются значение, ``null`` в качестве replacer и необязательный отступ.
+    Для строкового JSON отступ обрезается до предела JavaScript; зависимости
+    вложенного значения передаются вызывающему генератору.
+    """
     arguments = _split_top_level(value[len("JSON.stringify("):-1], ",")
     if not 1 <= len(arguments) <= 3 or not arguments[0].strip():
         raise ValueError("JSON.stringify должен содержать значение и не более двух дополнительных аргументов")
@@ -89,7 +110,13 @@ def _json_stringify(value: str) -> Expression:
 
 
 def _expression(value: str) -> Expression:
-    """Преобразовать поддерживаемое подмножество JavaScript-выражений."""
+    """Рекурсивно преобразовать литералы и операторы из поддерживаемого JS-подмножества.
+
+    Разбираются числа, строки, массивы и объекты, логические операторы,
+    сравнения, конкатенация, ``Number()``, ``JSON.stringify`` и ссылки n8n.
+    Ветка для каждого синтаксиса либо возвращает Python-код и зависимости,
+    либо поднимает ``ValueError`` с причиной неподдерживаемого выражения.
+    """
     value = value.strip()
     if value.startswith("Number(") and value.endswith(")"):
         argument = value[len("Number("):-1]
@@ -103,7 +130,7 @@ def _expression(value: str) -> Expression:
             "1 if value is True else float(value))"
         )
         return Expression(f"{number}({inner.code})", inner.dependencies)
-    # JavaScript && и || возвращают один из операндов, а не обязательно bool.
+    # В JS операторы &&/|| возвращают выбранный операнд; сохраняем это поведение, а не bool.
     for operator in ("||", "&&"):
         quote = None
         escaped = False
@@ -128,6 +155,7 @@ def _expression(value: str) -> Expression:
                 truth = "(v is not None and v is not False and v != 0 and v != '')"
                 result = f"v if {truth} else {right.code}" if operator == "||" else f"{right.code} if {truth} else v"
                 return Expression(f"(lambda v: {result})({left.code})", left.dependencies | right.dependencies)
+    # Убираем только скобки, которые оборачивают выражение целиком.
     if value.startswith("(") and value.endswith(")"):
         # Проверка гарантирует, что внешние скобки охватывают всё выражение.
         try:
@@ -136,6 +164,7 @@ def _expression(value: str) -> Expression:
             pass
         else:
             return _expression(value[1:-1])
+    # Сравнения ищутся вне строк и вложенных контейнеров; порядок нужен для === перед ==.
     comparisons = []
     for operator in ("===", "!==", "==", "!="):
         # Подстановка разделителя выполняется только вне строк и вложенных скобок.
@@ -188,6 +217,7 @@ def _expression(value: str) -> Expression:
         else:
             code = f"(lambda a, b: {comparison})({left.code}, {right.code})"
         return Expression(code, left.dependencies | right.dependencies)
+    # Конкатенация поддерживается как строковая; арифметическое сложение не угадывается.
     parts = _split_top_level(value, "+")
     if len(parts) > 1:
         compiled = [_expression(part) for part in parts]
@@ -247,7 +277,12 @@ def _expression(value: str) -> Expression:
 
 
 def _selector(value: str) -> Expression:
-    """Скомпилировать ссылку на текущий item, вход или именованный узел."""
+    """Преобразовать цепочку доступа к данным n8n в индексацию Python.
+
+    Поддерживаются ``$json``, ``$binary``, ``$execution``, ``$input`` и
+    ``$('Имя узла')`` с вызовами ``first()``, ``all()`` или paired-item
+    ``item``. Имена узлов записываются в ``dependencies`` для проверки порядка.
+    """
     match = _ROOT.match(value)
     if not match:
         raise ValueError("поддерживаются только ссылки на данные n8n")
@@ -262,6 +297,7 @@ def _selector(value: str) -> Expression:
         base = "execution"
     else:
         base = f"item[{root!r}]"
+    # Результат узла и полный вход — коллекции items, поэтому выбор элемента обязателен.
     if node is not None or root == "input":
         if node is not None and rest.startswith(".item") and (len(rest) == 5 or rest[5] in ".["):
             base = f"results[{node!r}][item['_n8n_lineage'][{node!r}]]"
@@ -287,10 +323,22 @@ def _selector(value: str) -> Expression:
 
 
 def compile_expression(value: str, *, node: str, parameter: str) -> Expression:
-    """Скомпилировать n8n expression и сообщить контекст при ошибке.
+    """Скомпилировать литерал, полное expression или текстовый шаблон n8n.
 
-    Обычный текст остаётся строковым литералом; шаблонные вставки и выражения
-    преобразуются во время генерации, поэтому runtime не читает workflow JSON.
+    Обычный текст становится строковым литералом. Вставки ``{{ ... }}``
+    компилируются по отдельности, а их зависимости объединяются. При ошибке
+    добавляется контекст узла и поля, чтобы найти место в исходном workflow.
+
+    Args:
+        value: Исходное значение параметра из JSON n8n.
+        node: Имя узла, в котором находится параметр.
+        parameter: Путь к параметру внутри настроек узла.
+
+    Returns:
+        Python-код и множество имён узлов, на которые он ссылается.
+
+    Raises:
+        WorkflowError: если шаблон неполон или выражение не поддерживается.
     """
     try:
         text = value[1:] if value.startswith("=") else value
@@ -298,10 +346,12 @@ def compile_expression(value: str, *, node: str, parameter: str) -> Expression:
         remainder = _TEMPLATE.sub("", text)
         if "{{" in remainder or "}}" in remainder:
             raise ValueError("незакрытый или некорректный шаблон")
+        # Без {{...}} строка после '=' считается ошибочной, обычный текст — литералом.
         if not matches:
             if value.startswith("="):
                 raise ValueError("не найдено выражение в {{ }}")
             return Expression(repr(value), frozenset())
+        # Полное выражение сохраняет исходный тип значения; шаблон всегда строит строку.
         if len(matches) == 1 and matches[0].span() == (0, len(text)):
             return _expression(matches[0].group(1).strip())
         pieces = []
