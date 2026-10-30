@@ -18,6 +18,7 @@ from n8n_transcriper.reader import (
     validate_workflow_issues,
 )
 from n8n_transcriper.generator import generate_project, node_conversion_issues
+from n8n_transcriper.versioning import node_version_warnings
 
 app = typer.Typer(help="Инструменты для преобразования workflow n8n в Python.")
 
@@ -223,7 +224,11 @@ def convert(
         out: Пустая папка, куда записываются файлы проекта.
     """
     try:
-        generate_project(read_workflow(workflow), out)
+        data = read_workflow(workflow)
+        warnings = node_version_warnings(data)
+        for _, warning in warnings:
+            _echo_terminal_safe(f"Предупреждение: {warning}")
+        generate_project(data, out)
         _create_uv_lock(out)
     except (WorkflowError, OSError) as exc:
         typer.echo(f"Ошибка: {exc}", err=True)
@@ -264,6 +269,7 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
         _echo_terminal_safe(f"Файл: {workflow}", err=True)
         _echo_terminal_safe(f"Подробности: {exc}", err=True)
         raise typer.Exit(1) from exc
+    version_warnings = node_version_warnings(data)
 
     # Сначала собираются независимые ошибки структуры и настроек каждого узла.
     structural_issues = validate_workflow_issues(data)
@@ -298,6 +304,8 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
         _echo_terminal_safe("Проверка workflow не пройдена.", err=True)
         _echo_terminal_safe(f"Файл: {workflow}", err=True)
         _echo_terminal_safe(f"Обнаружено проблем: {len(issues)}", err=True)
+        for _, warning in version_warnings:
+            _echo_terminal_safe(f"Предупреждение: {warning}", err=True)
         for index, (stage, issue) in enumerate(issues, start=1):
             _echo_terminal_safe(f"{index}. [{stage}] {issue}", err=True)
         raise typer.Exit(1)
@@ -316,3 +324,5 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
     )
     _echo_terminal_safe(f"Синтаксис сгенерированного Python проверен: {python_file_count} файлов.")
     _echo_terminal_safe("Ошибок совместимости, графа и expressions не найдено.")
+    for _, warning in version_warnings:
+        _echo_terminal_safe(f"Предупреждение: {warning}")

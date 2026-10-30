@@ -22,9 +22,6 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     """
     name = node["name"]
     p = node["parameters"]
-    version = node.get("typeVersion")
-    if not isinstance(version, (int, float)) or isinstance(version, bool) or version < 3 or version >= 4:
-        raise WorkflowError(f"Узел {name}: поддерживается Merge версии 3")
     # Append не требует правил сопоставления; Combine проверяется отдельной веткой.
     mode = p.get("mode", "append")
     if mode not in {"append", "combine"}:

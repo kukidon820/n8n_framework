@@ -36,6 +36,13 @@ from n8n_transcriper.converters.smtp import (
 from n8n_transcriper.graph import connections, execution_order, loop_feedback_edges
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
+from n8n_transcriper.versioning import (
+    add_manual_parameter_to_source,
+    compatible_node,
+    manual_parameter_payload,
+    node_version_info,
+    node_version_warning,
+)
 
 
 SUPPORTED_NODE_TYPES = {
@@ -54,6 +61,46 @@ SUPPORTED_NODE_TYPES = {
     "n8n-nodes-base.switch",
 }
 # Узлы с AI-моделью обрабатываются как зависимость агента, а не как main-шаг.
+
+_MANUAL_FALLBACK_LAYOUTS = {
+    "n8n-nodes-base.code": ("python_nodes", "items"),
+    "n8n-nodes-base.convertToFile": ("file_nodes", "items"),
+    "n8n-nodes-base.compression": ("file_nodes", "items"),
+    "n8n-nodes-base.extractFromFile": ("file_nodes", "items"),
+    "n8n-nodes-base.httpRequest": ("http_requests", "items, results, execution"),
+    "n8n-nodes-base.emailSend": ("email_senders", "items, results, execution"),
+    "n8n-nodes-base.set": ("operations", "items, results, execution"),
+    "n8n-nodes-base.postgres": ("database", "items, results, execution"),
+    "n8n-nodes-base.merge": ("operations", "merge_inputs"),
+    "@n8n/n8n-nodes-langchain.agent": ("ai_nodes", "items, results, execution"),
+    "n8n-nodes-base.if": ("operations", "items, results, execution"),
+    "n8n-nodes-base.switch": ("operations", "items, results, execution"),
+}
+
+
+def _manual_version_fallback_source(node: dict[str, Any], function_name: str) -> str:
+    """Сгенерировать честный TODO-узел, если новая версия изменила схему.
+
+    Узел явно прерывает запуск до ручной реализации, вместо того чтобы
+    возвращать фиктивный результат или молча игнорировать неизвестную настройку.
+    """
+    name = node.get("name", "<без имени>")
+    kind = node.get("type", "<неизвестный тип>")
+    version = node.get("typeVersion")
+    message = (
+        f"Узел {name} ({kind}, typeVersion={version!r}) требует ручной реализации. "
+        "Проверьте n8n_manual_parameters и добавьте поведение узла."
+    )
+    return (
+        f'"""Ручная заготовка для узла {name!r}; автоматическая версия не распознана."""\n\n'
+        f"def {function_name}(*args, n8n_manual_parameters=None):\n"
+        '    """Заменить эту функцию реализацией исходного узла n8n."""\n'
+        "    # TODO: реализовать исходную операцию и настройки узла вручную.\n"
+        "    # Структура настроек передана в n8n_manual_parameters['parameters_template'];\n"
+        "    # заполните значения и реализуйте неизвестные поля вручную.\n"
+        "    # Значения секретов намеренно не копируются из исходного workflow.\n"
+        f"    raise NotImplementedError({message!r})\n"
+    )
 
 
 def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
@@ -136,24 +183,25 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
             issues.append((name, f"{label}: неподдерживаемый тип {kind}"))
             continue
 
+        conversion_node = compatible_node(node)
         try:
             if kind == "n8n-nodes-base.code":
-                generate_code_node(node, "run_node")
+                generate_code_node(conversion_node, "run_node")
             elif kind in {
                 "n8n-nodes-base.convertToFile",
                 "n8n-nodes-base.compression",
                 "n8n-nodes-base.extractFromFile",
             }:
-                generate_file_node(node, "run_node")
+                generate_file_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.httpRequest":
                 if is_gmail_send_node(node):
-                    generate_smtp_node(node, "run_node")
+                    generate_smtp_node(conversion_node, "run_node")
                 else:
-                    generate_http_node(node, "run_node")
+                    generate_http_node(conversion_node, "run_node")
                     http_credential_fields(node)
                     http_secret_header_fields(node)
             elif kind == "n8n-nodes-base.emailSend":
-                generate_email_send_node(node, "run_node")
+                generate_email_send_node(conversion_node, "run_node")
                 credentials = node.get("credentials", {})
                 credential = credentials.get("smtp", {}) if isinstance(credentials, dict) else {}
                 if isinstance(credential, dict):
@@ -161,27 +209,33 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
                     if isinstance(credential_reference, str) and credential_reference:
                         email_smtp_credentials[name or label] = credential_reference
             elif kind == "n8n-nodes-base.set":
-                generate_edit_fields(node, "run_node")
+                generate_edit_fields(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.postgres":
                 credentials = node.get("credentials", {})
                 credential = credentials.get("postgres", {}) if isinstance(credentials, dict) else {}
                 if not isinstance(credential, dict) or not credential.get("id"):
                     issues.append((name, f"{label}: не указаны credentials PostgreSQL."))
-                generate_postgres_node(node, "run_node")
+                generate_postgres_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.merge":
-                generate_merge_node(node, "run_node")
+                generate_merge_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.splitInBatches":
-                generate_loop_node(node)
+                generate_loop_node(conversion_node)
             elif kind == "@n8n/n8n-nodes-langchain.agent":
                 model_name = agent_models.get(name)
                 model = nodes_by_name.get(model_name) if model_name else None
                 if model is None:
                     issues.append((name, f"{label}: не подключена chat-модель через ai_languageModel."))
                 else:
-                    generate_ai_agent(node, model, "run_node", "VALIDATION_MODEL")
+                    generate_ai_agent(conversion_node, model, "run_node", "VALIDATION_MODEL")
             elif kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
-                generate_condition_node(node, "run_node")
+                generate_condition_node(conversion_node, "run_node")
         except Exception as exc:
+            if node_version_info(node) is not None and isinstance(
+                exc, (WorkflowError, KeyError, TypeError, ValueError)
+            ):
+                # В generate_project такой узел получит явную ручную заготовку,
+                # если его новая схема не совпадает с известной конвертеру.
+                continue
             message = str(exc) if isinstance(exc, WorkflowError) else (
                 f"{label}: не удалось проверить узел ({type(exc).__name__})."
             )
@@ -292,7 +346,7 @@ def _loop_layout(
         raise WorkflowError("Пока поддерживается один узел Loop Over Items в workflow")
 
     name = loop_names[0]
-    settings = generate_loop_node(nodes[name])
+    settings = generate_loop_node(compatible_node(nodes[name]))
     feedback = [edge for edge in feedback_edges if edge.target == name]
     if len(feedback) != 1 or feedback[0].input != 0 or feedback[0].output != 0:
         raise WorkflowError(
@@ -456,7 +510,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
         if nodes[source]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.splitInBatches"} and any(port != 0 for port in ports):
             raise WorkflowError(f"Узел {source}: неподдерживаемые выходы")
         if nodes[source]["type"] == "n8n-nodes-base.splitInBatches":
-            settings = generate_loop_node(nodes[source])
+            settings = generate_loop_node(compatible_node(nodes[source]))
             if any(port >= settings.output_count for port in ports):
                 raise WorkflowError(f"Узел {source}: соединение с несуществующим выходом")
     order = loop_info["order"] if loop_info else base_order
@@ -495,10 +549,17 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     http_credentials: set[str] = set()
     http_credential_descriptions: dict[str, set[str]] = {}
     postgres_credential = None
+    version_notes: list[tuple[str, str]] = []
     # Для каждого узла создаём отдельный модуль; ниже формируется его вызов в main.py.
     for name in order:
         node = nodes[name]
         kind = node["type"]
+        conversion_node = compatible_node(node)
+        version_info = node_version_info(node)
+        version_warning = node_version_warning(node)
+        manual_parameters = manual_parameter_payload(node) if version_info else None
+        if version_warning:
+            version_notes.append((name, version_warning))
         # Оставляем в main.py отметку обо всех узлах, в том числе о пропущенных триггерах.
         node_comment = name.replace("\r", " ").replace("\n", " ")
         kind_comment = kind.replace("\r", " ").replace("\n", " ")
@@ -530,138 +591,159 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
         # Конвертер узла возвращает исходник функции и зависимости её параметров.
         stem = module_names[name]
         function = "run_node"
-        if kind == "n8n-nodes-base.code":
-            folder = "python_nodes"
-            source = generate_code_node(node, function)
-            arguments = "items"
-        elif kind in {"n8n-nodes-base.convertToFile", "n8n-nodes-base.compression", "n8n-nodes-base.extractFromFile"}:
-            folder = "file_nodes"
-            settings = workflow.get("settings", {})
-            timezone_name = settings.get("timezone") if isinstance(settings, dict) else None
-            source = generate_file_node(node, function, timezone_name)
-            dependencies.update(file_node_dependencies(node))
-            arguments = "items"
-        elif kind == "n8n-nodes-base.httpRequest":
-            params = node.get("parameters", {})
-            smtp_gmail = is_gmail_send_node(node)
-            if smtp_gmail:
+        try:
+            if kind == "n8n-nodes-base.code":
+                folder = "python_nodes"
+                source = generate_code_node(conversion_node, function)
+                arguments = "items"
+            elif kind in {"n8n-nodes-base.convertToFile", "n8n-nodes-base.compression", "n8n-nodes-base.extractFromFile"}:
+                folder = "file_nodes"
+                settings = workflow.get("settings", {})
+                timezone_name = settings.get("timezone") if isinstance(settings, dict) else None
+                source = generate_file_node(conversion_node, function, timezone_name)
+                dependencies.update(file_node_dependencies(node))
+                arguments = "items"
+            elif kind == "n8n-nodes-base.httpRequest":
+                params = node.get("parameters", {})
+                smtp_gmail = is_gmail_send_node(node)
+                if smtp_gmail:
+                    folder = "email_senders"
+                    source, references = generate_smtp_node(conversion_node, function)
+                    uses_smtp = True
+                else:
+                    folder = "http_requests"
+                    source = generate_http_node(conversion_node, function)
+                    credential_fields = http_credential_fields(node)
+                    http_credentials.update(credential_fields.values())
+                    secret_header_fields = http_secret_header_fields(node)
+                    http_credentials.update(secret_header_fields.values())
+                    credential_type = params.get("genericAuthType", "HTTP")
+                    credentials = node.get("credentials", {})
+                    credential = credentials.get(credential_type, {}) if isinstance(credentials, dict) else {}
+                    credential_label = credential.get("name", credential_type) if isinstance(credential, dict) else credential_type
+                    field_labels = {
+                        "USERNAME": "имя пользователя", "PASSWORD": "пароль", "TOKEN": "Bearer token",
+                        "HEADER_NAME": "имя заголовка", "HEADER_VALUE": "значение заголовка",
+                        "NAME": "имя query-параметра", "VALUE": "значение query-параметра",
+                    }
+                    for field, key in credential_fields.items():
+                        description = f"HTTP-узел «{name}», credential «{credential_label}»: {field_labels[field]}"
+                        http_credential_descriptions.setdefault(key, set()).add(description)
+                    header_parameters = params.get("headerParameters", {}).get("parameters", [])
+                    for index, key in secret_header_fields.items():
+                        header_name = header_parameters[index]["name"]
+                        description = f"HTTP-узел «{name}»: значение секретного заголовка «{header_name}»"
+                        http_credential_descriptions.setdefault(key, set()).add(description)
+                    values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody")), ("body", params.get("body"))]
+                    for key in ("headerParameters", "queryParameters", "bodyParameters"):
+                        values.extend((key, pair.get("value")) for pair in params.get(key, {}).get("parameters", []))
+                    references = set()
+                    for parameter, value in values:
+                        if isinstance(value, str):
+                            references.update(compile_expression(value, node=name, parameter=parameter).dependencies)
+                    dependencies.add("httpx>=0.27")
+                    uses_gmail |= params.get("nodeCredentialType") == "gmailOAuth2"
+                missing = references - (completed & ancestors[name] if branching else completed)
+                if missing:
+                    raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+                arguments = "items, results, execution"
+            elif kind == "n8n-nodes-base.emailSend":
                 folder = "email_senders"
-                source, references = generate_smtp_node(node, function)
-                uses_smtp = True
-            else:
-                folder = "http_requests"
-                source = generate_http_node(node, function)
-                credential_fields = http_credential_fields(node)
-                http_credentials.update(credential_fields.values())
-                secret_header_fields = http_secret_header_fields(node)
-                http_credentials.update(secret_header_fields.values())
-                credential_type = params.get("genericAuthType", "HTTP")
+                source, references = generate_email_send_node(conversion_node, function)
                 credentials = node.get("credentials", {})
-                credential = credentials.get(credential_type, {}) if isinstance(credentials, dict) else {}
-                credential_label = credential.get("name", credential_type) if isinstance(credential, dict) else credential_type
-                field_labels = {
-                    "USERNAME": "имя пользователя", "PASSWORD": "пароль", "TOKEN": "Bearer token",
-                    "HEADER_NAME": "имя заголовка", "HEADER_VALUE": "значение заголовка",
-                    "NAME": "имя query-параметра", "VALUE": "значение query-параметра",
-                }
-                for field, key in credential_fields.items():
-                    description = f"HTTP-узел «{name}», credential «{credential_label}»: {field_labels[field]}"
-                    http_credential_descriptions.setdefault(key, set()).add(description)
-                header_parameters = params.get("headerParameters", {}).get("parameters", [])
-                for index, key in secret_header_fields.items():
-                    header_name = header_parameters[index]["name"]
-                    description = f"HTTP-узел «{name}»: значение секретного заголовка «{header_name}»"
-                    http_credential_descriptions.setdefault(key, set()).add(description)
-                values = [("url", params.get("url")), ("jsonBody", params.get("jsonBody")), ("body", params.get("body"))]
-                for key in ("headerParameters", "queryParameters", "bodyParameters"):
-                    values.extend((key, pair.get("value")) for pair in params.get(key, {}).get("parameters", []))
-                references = set()
-                for parameter, value in values:
-                    if isinstance(value, str):
-                        references.update(compile_expression(value, node=name, parameter=parameter).dependencies)
+                credential = credentials.get("smtp", {}) if isinstance(credentials, dict) else {}
+                credential_reference = (
+                    credential.get("id") or credential.get("name")
+                    if isinstance(credential, dict)
+                    else None
+                )
+                if email_smtp_credential is not None and credential_reference != email_smtp_credential:
+                    raise WorkflowError(f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются")
+                email_smtp_credential = credential_reference
+                uses_email_send = True
+                missing = references - (completed & ancestors[name] if branching else completed)
+                if missing:
+                    raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+                arguments = "items, results, execution"
+            elif kind == "n8n-nodes-base.set":
+                folder = "operations"
+                source, references = generate_edit_fields(conversion_node, function)
+                missing = references - (completed & ancestors[name] if branching else completed)
+                if missing:
+                    raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+                arguments = "items, results, execution"
+            elif kind == "n8n-nodes-base.postgres":
+                credential = node.get("credentials", {}).get("postgres", {})
+                credential_id = credential.get("id") if isinstance(credential, dict) else None
+                if not isinstance(credential_id, str) or not credential_id:
+                    raise WorkflowError(f"Узел {name}: требуется PostgreSQL credential")
+                if postgres_credential is not None and postgres_credential != credential_id:
+                    raise WorkflowError(f"Узел {name}: несколько PostgreSQL credentials пока не поддерживаются")
+                postgres_credential = credential_id
+                folder = "database"
+                source, references = generate_postgres_node(conversion_node, function)
+                missing = references - (completed & ancestors[name] if branching else completed)
+                if missing:
+                    raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+                arguments = "items, results, execution"
+                dependencies.add("psycopg[binary]>=3.1")
+                files["database/postgres.py"] = POSTGRES_MODULE
+            elif kind == "n8n-nodes-base.merge":
+                folder = "operations"
+                source, input_count = generate_merge_node(conversion_node, function)
+                if [edge.input for edge in parents[name]] != list(range(input_count)):
+                    raise WorkflowError(f"Узел {name}: Merge требует по одному соединению на каждый вход")
+                arguments = "merge_inputs"
+            elif kind == "n8n-nodes-base.splitInBatches":
+                folder = "operations"
+                source = LOOP_MODULE
+                arguments = ""
+            elif kind == "@n8n/n8n-nodes-langchain.agent":
+                if name not in models:
+                    raise WorkflowError(f"Узел {name}: не подключена chat-модель через ai_languageModel")
+                folder = "ai_nodes"
+                model_name = models[name]
+                model_prefix = module_names[model_name].upper()
+                source, references, model_config = generate_ai_agent(
+                    conversion_node, compatible_node(nodes[model_name]), function, model_prefix
+                )
+                ai_model_configs[model_prefix] = model_config
+                missing = references - (completed & ancestors[name] if branching else completed)
+                if missing:
+                    raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+                arguments = "items, results, execution"
                 dependencies.add("httpx>=0.27")
-                uses_gmail |= params.get("nodeCredentialType") == "gmailOAuth2"
-            missing = references - (completed & ancestors[name] if branching else completed)
-            if missing:
-                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
-            arguments = "items, results, execution"
-        elif kind == "n8n-nodes-base.emailSend":
-            folder = "email_senders"
-            source, references = generate_email_send_node(node, function)
-            credentials = node.get("credentials", {})
-            credential = credentials.get("smtp", {}) if isinstance(credentials, dict) else {}
-            credential_reference = (
-                credential.get("id") or credential.get("name")
-                if isinstance(credential, dict)
-                else None
+            elif kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
+                folder = "operations"
+                source, references, output_count = generate_condition_node(conversion_node, function)
+                missing = references - (completed & ancestors[name])
+                if missing:
+                    raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
+                if any(edge.output >= output_count for edge in main_edges if edge.source == name):
+                    raise WorkflowError(f"Узел {name}: соединение с несуществующим выходом")
+                arguments = "items, results, execution"
+            else:
+                raise WorkflowError(f"Узел {name}: неподдерживаемый тип {kind}")
+        except (WorkflowError, KeyError, TypeError, ValueError):
+            fallback_layout = _MANUAL_FALLBACK_LAYOUTS.get(kind)
+            if version_info is None or fallback_layout is None:
+                raise
+            folder, arguments = fallback_layout
+            manual_parameters = dict(manual_parameters or {})
+            manual_parameters["unsupported_parameter_paths"] = manual_parameters.get(
+                "parameter_paths", ()
             )
-            if email_smtp_credential is not None and credential_reference != email_smtp_credential:
-                raise WorkflowError(f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются")
-            email_smtp_credential = credential_reference
-            uses_email_send = True
-            missing = references - (completed & ancestors[name] if branching else completed)
-            if missing:
-                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
-            arguments = "items, results, execution"
-        elif kind == "n8n-nodes-base.set":
-            folder = "operations"
-            source, references = generate_edit_fields(node, function)
-            missing = references - (completed & ancestors[name] if branching else completed)
-            if missing:
-                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
-            arguments = "items, results, execution"
-        elif kind == "n8n-nodes-base.postgres":
-            credential = node.get("credentials", {}).get("postgres", {})
-            credential_id = credential.get("id") if isinstance(credential, dict) else None
-            if not isinstance(credential_id, str) or not credential_id:
-                raise WorkflowError(f"Узел {name}: требуется PostgreSQL credential")
-            if postgres_credential is not None and postgres_credential != credential_id:
-                raise WorkflowError(f"Узел {name}: несколько PostgreSQL credentials пока не поддерживаются")
-            postgres_credential = credential_id
-            folder = "database"
-            source, references = generate_postgres_node(node, function)
-            missing = references - (completed & ancestors[name] if branching else completed)
-            if missing:
-                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
-            arguments = "items, results, execution"
-            dependencies.add("psycopg[binary]>=3.1")
-            files["database/postgres.py"] = POSTGRES_MODULE
-        elif kind == "n8n-nodes-base.merge":
-            folder = "operations"
-            source, input_count = generate_merge_node(node, function)
-            if [edge.input for edge in parents[name]] != list(range(input_count)):
-                raise WorkflowError(f"Узел {name}: Merge требует по одному соединению на каждый вход")
-            arguments = "merge_inputs"
-        elif kind == "n8n-nodes-base.splitInBatches":
-            folder = "operations"
-            source = LOOP_MODULE
-            arguments = ""
-        elif kind == "@n8n/n8n-nodes-langchain.agent":
-            if name not in models:
-                raise WorkflowError(f"Узел {name}: не подключена chat-модель через ai_languageModel")
-            folder = "ai_nodes"
-            model_name = models[name]
-            model_prefix = module_names[model_name].upper()
-            source, references, model_config = generate_ai_agent(
-                node, nodes[model_name], function, model_prefix
-            )
-            ai_model_configs[model_prefix] = model_config
-            missing = references - (completed & ancestors[name] if branching else completed)
-            if missing:
-                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
-            arguments = "items, results, execution"
-            dependencies.add("httpx>=0.27")
-        elif kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
-            folder = "operations"
-            source, references, output_count = generate_condition_node(node, function)
-            missing = references - (completed & ancestors[name])
-            if missing:
-                raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
-            if any(edge.output >= output_count for edge in main_edges if edge.source == name):
-                raise WorkflowError(f"Узел {name}: соединение с несуществующим выходом")
-            arguments = "items, results, execution"
-        else:
-            raise WorkflowError(f"Узел {name}: неподдерживаемый тип {kind}")
+            if kind == "n8n-nodes-base.httpRequest" and is_gmail_send_node(node):
+                folder = "email_senders"
+            source = _manual_version_fallback_source(node, function)
+            if kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
+                connected_ports = [edge.output for edge in main_edges if edge.source == name]
+                output_count = max(connected_ports, default=1) + 1
+        if version_warning and kind != "n8n-nodes-base.splitInBatches":
+            source = add_manual_parameter_to_source(source, function, version_warning)
+        call_arguments = arguments
+        if manual_parameters is not None:
+            call_arguments += f", n8n_manual_parameters={manual_parameters!r}"
         # Сохраняем исходник модуля и регистрируем импорт для явного вызова из main.py.
         files[f"{folder}/{stem}.py"] = source
         files[f"{folder}/__init__.py"] = ""
@@ -679,6 +761,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                 calls.append(f"    items.extend({'deepcopy(' + value + ')' if fanout else value})")
             calls.extend([
                 # Экземпляр хранит batchSize/reset конкретного Loop из workflow.
+                f"    {loop_state_name} = Loop(batch_size={loop_settings.batch_size}, reset={loop_settings.reset!r}, n8n_manual_parameters={manual_parameters!r})"
+                if manual_parameters is not None else
                 f"    {loop_state_name} = Loop(batch_size={loop_settings.batch_size}, reset={loop_settings.reset!r})",
                 f"    {aliases[name]} = [[] for _ in range({loop_settings.output_count})]",
                 f"    for loop_batch in {loop_state_name}.iterate(items):",
@@ -725,17 +809,17 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             if is_condition:
                 if linked_items:
                     calls.extend([
-                        f"        branch_outputs = {stem}({arguments})",
+                        f"        branch_outputs = {stem}({call_arguments})",
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r}, "
                         f"len({loop_state_name}.results.get({name!r}, [])))" if name in loop_body_nodes else
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r})",
                     ])
                 else:
-                    calls.append(f"        {aliases[name]} = {stem}({arguments})")
+                    calls.append(f"        {aliases[name]} = {stem}({call_arguments})")
             else:
                 if linked_items and kind != "n8n-nodes-base.merge":
                     calls.append("        source_items = items")
-                calls.append(f"        items = {stem}({arguments})")
+                calls.append(f"        items = {stem}({call_arguments})")
                 if node.get("alwaysOutputData", False):
                     calls.extend(['        if not items:', '            items = [{"json": {}}]'])
                 if linked_items:
@@ -772,7 +856,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                 calls.append("    items = items[:1]")
             if linked_items:
                 calls.append("    source_items = items")
-            calls.append(f"    items = {stem}({arguments})")
+            calls.append(f"    items = {stem}({call_arguments})")
             if node.get("alwaysOutputData", False):
                 calls.extend(['    if not items:', '        items = [{"json": {}}]'])
             if linked_items:
@@ -1046,10 +1130,23 @@ def _clean_items(items):
             + "\n".join(trigger_sections)
             + "\n"
         )
+    version_documentation = ""
+    if version_notes:
+        version_documentation = (
+            "## Предупреждения о версиях узлов\n\n"
+            "Для перечисленных узлов использована ближайшая версия, которую умеет преобразовывать конвертер. "
+            "В каждом generated-модуле есть TODO-комментарий и аргумент `n8n_manual_parameters` с шаблоном структуры настроек. "
+            "Значения параметров заменены на `None`, чтобы не раскрывать секреты; заполните их и реализуйте отличающиеся настройки вручную. "
+            "Если схема узла не распознана конвертером, его generated-функция завершится с `NotImplementedError`, пока вы не добавите реализацию. "
+            "Проверьте настройки и вручную добавьте поведение, отличающееся в исходной версии.\n\n"
+            + "\n".join(f"- {message}" for _, message in version_notes)
+            + "\n\n"
+        )
     files["README.md"] = (
         '# Сгенерированный проект\n\n'
         'Проект запускает преобразованный workflow как обычную Python-программу. Исходный JSON для запуска не нужен.\n\n'
         + trigger_documentation
+        + version_documentation
         + '## Требования и установка\n\n'
         'Нужен Python 3.12 или новее и установленный uv. Файл `.python-version` выбирает Python 3.12 для команд uv. '
         'Зависимости указаны в `pyproject.toml`, '
@@ -1076,9 +1173,14 @@ def _clean_items(items):
         '`main.py` можно импортировать из другого кода: `from main import run`; функция `run(input_data)` принимает список items вида `[{"json": {...}}]`.\n'
     )
     files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'
+    version_report = (
+        "\n\nПредупреждения о версиях:\n"
+        + "\n".join(f"- {message}" for _, message in version_notes)
+        if version_notes else ""
+    )
     files["conversion_report.md"] = (f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. '
         f'Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n\n'
-        f'Настройки авторизации: {credentials}.\n')
+        f'Настройки авторизации: {credentials}.' + version_report + '\n')
     # Без output возвращаем файловый снимок для validate и тестов; иначе пишем его на диск.
     if output is None:
         return files
