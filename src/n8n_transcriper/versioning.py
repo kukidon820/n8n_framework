@@ -53,6 +53,10 @@ def node_version_info(node: dict[str, Any]) -> dict[str, Any] | None:
             fallback = 3.3
         elif raw_version > 3.5:
             fallback = 3.5
+    elif kind == "n8n-nodes-base.noOp":
+        supported = "1"
+        if not numeric or raw_version != 1:
+            fallback = 1
     elif kind == "n8n-nodes-base.splitInBatches":
         supported = "основные версии 1, 2 и 3"
         if "typeVersion" not in node:
@@ -101,6 +105,9 @@ def compatible_node(node: dict[str, Any]) -> dict[str, Any]:
     info = node_version_info(node)
     if info is not None:
         compatible["typeVersion"] = info["fallback"]
+        if node.get("type") == "n8n-nodes-base.set":
+            # Keep Set's original version so converters can distinguish legacy field selection.
+            compatible["_n8nOriginalTypeVersion"] = node.get("typeVersion")
         if node.get("type") == "n8n-nodes-base.splitInBatches":
             original_parameters = node.get("parameters")
             parameters = dict(original_parameters) if isinstance(original_parameters, dict) else {}
