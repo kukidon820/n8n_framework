@@ -7,7 +7,6 @@ Extract from File (текст/base64). Сгенерированные функц
 
 import codecs
 import keyword
-import json
 import textwrap
 from typing import Any
 
