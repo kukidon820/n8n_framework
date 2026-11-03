@@ -67,6 +67,14 @@ def node_version_info(node: dict[str, Any]) -> dict[str, Any] | None:
             fallback = 1
         elif int(raw_version) > 3:
             fallback = 3
+    elif kind == "n8n-nodes-base.dataTable":
+        supported = "1.0–1.1"
+        if not numeric:
+            fallback = 1.1
+        elif raw_version < 1:
+            fallback = 1
+        elif raw_version > 1.1:
+            fallback = 1.1
     elif kind == "n8n-nodes-base.httpRequest":
         if raw_version is not None and not numeric:
             supported = "числовая версия (fallback: 4)"
@@ -243,7 +251,7 @@ def add_manual_parameter_to_source(
     warning: str,
 ) -> str:
     """Добавить в generated-функцию аргумент и TODO-комментарии о fallback."""
-    pattern = re.compile(rf"(?m)^(def {re.escape(function_name)}\()([^\n]*)(\):)$")
+    pattern = re.compile(rf"(?m)^((?:async )?def {re.escape(function_name)}\()([^\n]*)(\):)$")
     match = pattern.search(source)
     if match is None:
         raise ValueError(f"Не удалось найти функцию {function_name} для пометки версии")
