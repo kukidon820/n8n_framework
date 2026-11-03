@@ -30,6 +30,7 @@ from n8n_transcriper.converters.http import (
     http_secret_header_fields,
 )
 from n8n_transcriper.converters.merge import generate_merge_node
+from n8n_transcriper.converters.noop import generate_noop_node
 from n8n_transcriper.converters.loop import LOOP_MODULE, generate_loop_node
 from n8n_transcriper.converters.postgres import POSTGRES_MODULE, generate_postgres_node
 from n8n_transcriper.converters.smtp import (
@@ -57,6 +58,7 @@ SUPPORTED_NODE_TYPES = {
     "n8n-nodes-base.httpRequest",
     "n8n-nodes-base.emailSend",
     "n8n-nodes-base.set",
+    "n8n-nodes-base.noOp",
     "n8n-nodes-base.postgres",
     "n8n-nodes-base.dataTable",
     "n8n-nodes-base.merge",
@@ -75,6 +77,7 @@ _MANUAL_FALLBACK_LAYOUTS = {
     "n8n-nodes-base.httpRequest": ("http_requests", "items, results, execution"),
     "n8n-nodes-base.emailSend": ("email_senders", "items, results, execution"),
     "n8n-nodes-base.set": ("operations", "items, results, execution"),
+    "n8n-nodes-base.noOp": ("operations", "items"),
     "n8n-nodes-base.postgres": ("database", "items, results, execution"),
     "n8n-nodes-base.dataTable": ("database", "items, results, execution"),
     "n8n-nodes-base.merge": ("operations", "merge_inputs"),
@@ -222,6 +225,8 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
                         email_smtp_credentials[name or label] = credential_reference
             elif kind == "n8n-nodes-base.set":
                 generate_edit_fields(conversion_node, "run_node")
+            elif kind == "n8n-nodes-base.noOp":
+                generate_noop_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.postgres":
                 credentials = node.get("credentials", {})
                 credential = credentials.get("postgres", {}) if isinstance(credentials, dict) else {}
@@ -700,6 +705,10 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                 if missing:
                     raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
                 arguments = "items, results, execution"
+            elif kind == "n8n-nodes-base.noOp":
+                folder = "operations"
+                source = generate_noop_node(conversion_node, function)
+                arguments = "items"
             elif kind == "n8n-nodes-base.postgres":
                 credential = node.get("credentials", {}).get("postgres", {})
                 credential_id = credential.get("id") if isinstance(credential, dict) else None
