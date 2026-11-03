@@ -74,6 +74,16 @@ def post(url, **kwargs):
     assert url == "https://openrouter.ai/api/v1/chat/completions"
     prompts.append(kwargs["json"]["messages"][1]["content"])
     return Response()
+
+class AsyncClient:
+    def __init__(self, **options):
+        self.options = options
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, *args):
+        return None
+    async def post(self, url, **kwargs):
+        return post(url, **kwargs)
 ''', encoding="utf-8")
     script = '''
 import httpx

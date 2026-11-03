@@ -152,7 +152,7 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
             return value
         raise
 '''
-    source = ('import json\nimport re\nfrom copy import deepcopy\n\n\n' + helper + '\n\n' + f'def {function_name}(items, results, execution):\n' +
+    source = ('import json\nimport re\nfrom copy import deepcopy\n\n\n' + helper + '\n\n' + f'async def {function_name}(items, results, execution):\n' +
               '    """Применить Edit Fields к каждому входному item."""\n' +
               '    result = []\n    for item in items:\n' +
               f'        data = {data_code}\n' +

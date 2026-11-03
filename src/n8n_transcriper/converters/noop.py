@@ -17,7 +17,7 @@ def generate_noop_node(node: dict[str, Any], function_name: str) -> str:
     if not isinstance(parameters, dict) or parameters:
         raise WorkflowError(f"Узел {name}: No Operation не поддерживает параметры")
 
-    return f'''def {function_name}(items):
+    return f'''async def {function_name}(items):
     """Передать items дальше без изменений, как это делает No Operation в n8n."""
     return items
 '''

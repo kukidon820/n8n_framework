@@ -138,5 +138,5 @@ def generate_condition_node(node: dict[str, Any], function_name: str) -> tuple[s
     if operation == "lte": return left <= right
     raise ValueError("Неизвестный оператор")
 '''
-    source = 'import json\n\n\n' + helper + f'\n\ndef {function_name}(items, results, execution):\n    """Распределить входные items по выходным портам узла.\n\n    Возвращает список портов; внутри каждого порта сохраняется порядок items.\n    """\n    outputs = [[] for _ in range({count})]\n    for item in items:\n' + body + '    return outputs\n'
+    source = 'import json\n\n\n' + helper + f'\n\nasync def {function_name}(items, results, execution):\n    """Распределить входные items по выходным портам узла.\n\n    Возвращает список портов; внутри каждого порта сохраняется порядок items.\n    """\n    outputs = [[] for _ in range({count})]\n    for item in items:\n' + body + '    return outputs\n'
     return source, dependencies, count

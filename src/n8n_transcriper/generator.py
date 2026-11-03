@@ -39,6 +39,7 @@ from n8n_transcriper.converters.smtp import (
     generate_smtp_node,
     is_gmail_send_node,
 )
+from n8n_transcriper.converters.wait import generate_wait_node
 from n8n_transcriper.graph import connections, execution_order, loop_feedback_edges
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
@@ -64,6 +65,7 @@ SUPPORTED_NODE_TYPES = {
     "n8n-nodes-base.dataTable",
     "n8n-nodes-base.merge",
     "n8n-nodes-base.splitInBatches",
+    "n8n-nodes-base.wait",
     "@n8n/n8n-nodes-langchain.agent",
     "n8n-nodes-base.if",
     "n8n-nodes-base.switch",
@@ -81,6 +83,7 @@ _MANUAL_FALLBACK_LAYOUTS = {
     "n8n-nodes-base.noOp": ("operations", "items"),
     "n8n-nodes-base.postgres": ("database", "items, results, execution"),
     "n8n-nodes-base.dataTable": ("database", "items, results, execution"),
+    "n8n-nodes-base.wait": ("operations", "items, results, execution"),
     "n8n-nodes-base.merge": ("operations", "merge_inputs"),
     "@n8n/n8n-nodes-langchain.agent": ("ai_nodes", "items, results, execution"),
     "n8n-nodes-base.if": ("operations", "items, results, execution"),
@@ -242,6 +245,8 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
                 generate_postgres_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.dataTable":
                 generate_data_table_node(conversion_node, "run_node")
+            elif kind == "n8n-nodes-base.wait":
+                generate_wait_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.merge":
                 generate_merge_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.splitInBatches":
@@ -263,8 +268,16 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
             elif kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
                 generate_condition_node(conversion_node, "run_node")
         except Exception as exc:
-            if node_version_info(node) is not None and isinstance(
-                exc, (WorkflowError, KeyError, TypeError, ValueError)
+            wait_parameters = node.get("parameters")
+            wait_resume = (
+                wait_parameters.get("resume")
+                if kind == "n8n-nodes-base.wait" and isinstance(wait_parameters, dict)
+                else None
+            )
+            if (
+                wait_resume not in ("webhook", "form")
+                and node_version_info(node) is not None
+                and isinstance(exc, (WorkflowError, KeyError, TypeError, ValueError))
             ):
                 # В generate_project такой узел получит явную ручную заготовку,
                 # если его новая схема не совпадает с известной конвертеру.
@@ -849,6 +862,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
     uses_gmail = False
     uses_smtp = False
     uses_email_send = False
+    uses_wait = False
     email_smtp_credential = None
     http_credentials: set[str] = set()
     http_credential_descriptions: dict[str, set[str]] = {}
@@ -916,6 +930,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     folder = "email_senders"
                     source, references = generate_smtp_node(conversion_node, function)
                     uses_smtp = True
+                    dependencies.add("aiosmtplib>=3.0")
                 else:
                     folder = "http_requests"
                     source = generate_http_node(conversion_node, function)
@@ -967,6 +982,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     raise WorkflowError(f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются")
                 email_smtp_credential = credential_reference
                 uses_email_send = True
+                dependencies.add("aiosmtplib>=3.0")
                 missing = references - (completed & ancestors[name] if branching else completed)
                 if missing:
                     raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
@@ -1028,6 +1044,16 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 folder = "operations"
                 source = LOOP_MODULE
                 arguments = ""
+            elif kind == "n8n-nodes-base.wait":
+                folder = "operations"
+                uses_wait = True
+                source, references = generate_wait_node(conversion_node, function)
+                missing = references - (completed & ancestors[name] if branching else completed)
+                if missing:
+                    raise WorkflowError(
+                        f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}"
+                    )
+                arguments = "items, results, execution"
             elif kind == "@n8n/n8n-nodes-langchain.agent":
                 if name not in models:
                     raise WorkflowError(f"Узел {name}: не подключена chat-модель через ai_languageModel")
@@ -1055,6 +1081,13 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             else:
                 raise WorkflowError(f"Узел {name}: неподдерживаемый тип {kind}")
         except (WorkflowError, KeyError, TypeError, ValueError):
+            wait_parameters = node.get("parameters")
+            if (
+                kind == "n8n-nodes-base.wait"
+                and isinstance(wait_parameters, dict)
+                and wait_parameters.get("resume") in ("webhook", "form")
+            ):
+                raise
             fallback_layout = _MANUAL_FALLBACK_LAYOUTS.get(kind)
             if version_info is None or fallback_layout is None:
                 raise
@@ -1068,21 +1101,23 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             source = _manual_version_fallback_source(
                 node,
                 function,
-                asynchronous=kind == "n8n-nodes-base.dataTable",
+                asynchronous=True,
             )
             if kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
                 connected_ports = [edge.output for edge in main_edges if edge.source == name]
                 output_count = max(connected_ports, default=1) + 1
         if version_warning and kind != "n8n-nodes-base.splitInBatches":
             source = add_manual_parameter_to_source(source, function, version_warning)
+        if kind != "n8n-nodes-base.splitInBatches" and not re.search(
+            rf"(?m)^async def {re.escape(function)}\(", source
+        ):
+            raise WorkflowError(
+                f"Узел {name}: конвертер должен генерировать async-функцию {function}"
+            )
         call_arguments = arguments
         if manual_parameters is not None:
             call_arguments += f", n8n_manual_parameters={manual_parameters!r}"
-        invocation = (
-            f"await {stem}({call_arguments})"
-            if kind == "n8n-nodes-base.dataTable"
-            else f"{stem}({call_arguments})"
-        )
+        invocation = f"await {stem}({call_arguments})"
         # Сохраняем исходник модуля и регистрируем импорт для явного вызова из main.py.
         files[f"{folder}/{stem}.py"] = source
         files[f"{folder}/__init__.py"] = ""
@@ -1111,7 +1146,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     ")"
                 ),
                 f"    {aliases[name]} = [[] for _ in range({loop_settings.output_count})]",
-                f"    for loop_batch in {loop_state_name}.iterate(items):",
+                f"    async for loop_batch in {loop_state_name}.iterate(items):",
             ])
             if linked_items:
                 calls.append(f"        {loop_state_name}.link_batch({name!r}, loop_batch)")
@@ -1155,13 +1190,13 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             if is_condition:
                 if linked_items:
                     calls.extend([
-                        f"        branch_outputs = {stem}({call_arguments})",
+                        f"        branch_outputs = await {stem}({call_arguments})",
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r}, "
                         f"len({loop_state_name}.results.get({name!r}, [])))" if name in loop_body_nodes else
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r})",
                     ])
                 else:
-                    calls.append(f"        {aliases[name]} = {stem}({call_arguments})")
+                    calls.append(f"        {aliases[name]} = await {stem}({call_arguments})")
             else:
                 if linked_items and kind != "n8n-nodes-base.merge":
                     calls.append("        source_items = items")
@@ -1228,7 +1263,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 calls[call_index] = "    " + calls[call_index]
             feedback = loop_info["feedback"]
             calls.append(
-                f"        {loop_state_name}.collect({aliases[feedback.source]}[{feedback.output}])"
+                f"        await {loop_state_name}.collect({aliases[feedback.source]}[{feedback.output}])"
             )
             loop_settings = loop_info["settings"]
             if loop_settings.done_output is not None:
@@ -1361,20 +1396,19 @@ def _clean_items(items):
         item.pop("__transcriper_sources", None)
     return items
 ''') if linked_items else ""
-    runner_name = "run_async" if uses_data_tables else "run"
-    runner_definition = "async def" if uses_data_tables else "def"
-    asyncio_import = "import asyncio\n" if uses_data_tables else ""
+    runner_name = "run_async"
+    runner_definition = "async def"
     sync_wrapper = (
         "\n\ndef run(input_data=None):\n"
         "    \"\"\"Синхронная обёртка для ручного запуска асинхронного workflow.\"\"\"\n"
+        "    if sys.platform == \"win32\":\n"
+        "        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:\n"
+        "            return runner.run(run_async(input_data))\n"
         "    return asyncio.run(run_async(input_data))\n"
-        if uses_data_tables
-        else ""
     )
     files["main.py"] = (
         '"""Точка ручного запуска сгенерированного workflow."""\n\n'
-        + asyncio_import
-        + "import logging\nimport sys\nimport uuid\n"
+        + "import asyncio\nimport logging\nimport sys\nimport uuid\n"
         + ("from copy import deepcopy\n" if branching else "")
         + "\n"
         + "\n".join(imports)
@@ -1514,8 +1548,18 @@ def _clean_items(items):
             "Данные внутренних таблиц n8n автоматически в PostgreSQL проекта не копируются.\n\n"
             "Каждая найденная строка возвращается отдельным item в форме "
             '{"json": {"id": "...", "createdAt": "...", "updatedAt": "...", "...": "..."}}. '
-            "Даты и время переводятся в ISO-строки. При асинхронном встраивании вызывайте "
-            "run_async через await.\n\n"
+            "Даты и время переводятся в ISO-строки. Встраивайте проект через "
+            "асинхронную функцию `await run_async(...)`.\n\n"
+        )
+    wait_documentation = ""
+    if uses_wait:
+        wait_documentation = (
+            "## Wait\n\n"
+            "Узел Wait является асинхронным: режим `timeInterval` использует `amount` и `unit` "
+            "(seconds, minutes, hours или days), а `specificTime` ждёт до `dateTime`. "
+            "После паузы передаются те же входные items. Режимы `webhook` и `form` пропускаются "
+            "с диагностикой, так как standalone-проект не хранит приостановленный запуск и не "
+            "поднимает endpoint для внешнего возобновления.\n\n"
         )
     trigger_documentation = ""
     if skipped_triggers:
@@ -1558,6 +1602,7 @@ def _clean_items(items):
         + trigger_documentation
         + version_documentation
         + data_table_documentation
+        + wait_documentation
         + '## Требования и установка\n\n'
         'Нужен Python 3.12 или новее и установленный uv. Файл `.python-version` выбирает Python 3.12 для команд uv. '
         'Зависимости указаны в `pyproject.toml`, '
@@ -1581,7 +1626,9 @@ def _clean_items(items):
         'Запустите workflow командой `uv run python main.py` на Windows, Linux и macOS. '
         'Помимо команды выше, используйте `run.bat` на Windows или `sh run.sh` на Linux/macOS. '
         'В интерактивном терминале эти скрипты ждут подтверждения после выполнения, чтобы оставить логи на экране.\n\n'
-        '`main.py` можно импортировать из другого кода: `from main import run`; функция `run(input_data)` принимает список items вида `[{"json": {...}}]`.\n'
+        '`main.py` можно импортировать из другого async-кода: `from main import run_async`, затем `await run_async(input_data)`. '
+        'Для обычного ручного запуска доступна синхронная обёртка `run(input_data)`, которая создаёт event loop. '
+        'Каждый узел сгенерирован как async-функция с нативными async-клиентами для сетевых и базовых операций.\n'
     )
     files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'
     version_report = (
@@ -1613,13 +1660,22 @@ def _empty_partial_project() -> dict[str, str]:
     }
     files["main.py"] = '''"""Точка входа частично сконвертированного workflow."""
 
+import asyncio
 import logging
 import sys
 
 
-def run(input_data=None):
-    """Вернуть входные items, если все исполняемые узлы были пропущены."""
+async def run_async(input_data=None):
+    """Асинхронно вернуть входные items, если все узлы были пропущены."""
     return input_data if input_data is not None else [{"json": {}}]
+
+
+def run(input_data=None):
+    """Запустить async workflow из обычного синхронного кода."""
+    if sys.platform == "win32":
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            return runner.run(run_async(input_data))
+    return asyncio.run(run_async(input_data))
 
 
 if __name__ == "__main__":

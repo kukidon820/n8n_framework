@@ -3,6 +3,7 @@
 Convert to File, ZIP и Extract from File работают с реальными байтами в тестах.
 """
 
+import asyncio
 import base64
 from io import BytesIO
 from zipfile import ZipFile
@@ -34,7 +35,7 @@ def test_real_workflow_file_chain():
                  "ZIP - Decompress for AI", "CSV - Read file for AI"):
         namespace = {}
         exec(generate_file_node(nodes[name], "run"), namespace)
-        data = namespace["run"](data)
+        data = asyncio.run(namespace["run"](data))
         if name == "CSV - Create file":
             assert data[0]["binary"]["data"]["data"].startswith(b"\xef\xbb\xbf")
         if name == "ZIP - Save attachment base64":

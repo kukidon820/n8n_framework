@@ -159,14 +159,14 @@ def generate_ai_agent(
     prompt = compile_expression(prompt_value, node=name, parameter="text")
     system = compile_expression(system_value, node=name, parameter="options.systemMessage")
     prefix = config_prefix
-    source = f'''import json
-import time
+    source = f'''import asyncio
+import json
 
 import httpx
 import config
 
 
-def {function_name}(items, results, execution):
+async def {function_name}(items, results, execution):
     """Отправить prompt для каждого item и вернуть ответы модели.
 
     Обязательные настройки читаются из config.py. HTTP-ошибки повторяются с
@@ -180,38 +180,38 @@ def {function_name}(items, results, execution):
     if not config.{prefix}_MODEL:
         raise ValueError("Не задан {prefix}_MODEL в config.py")
     output = []
-    for item in items:
-        # Prompt и сообщения формируются отдельно для каждого входного item.
-        payload = {{
-            **config.{prefix}_OPTIONS,
-            "model": config.{prefix}_MODEL,
-            "messages": [
-                {{"role": "system", "content": {system.code}}},
-                {{"role": "user", "content": {prompt.code}}},
-            ],
-        }}
-        headers = {{"Content-Type": "application/json"}}
-        headers[config.{prefix}_API_KEY_HEADER] = f"{{config.{prefix}_API_KEY_PREFIX}}{{config.{prefix}_API_KEY}}"
-        # Количество попыток включает первый запрос; пауза растёт до 8 секунд.
-        for attempt in range(config.{prefix}_MAX_RETRIES + 1):
+    async with httpx.AsyncClient(timeout=config.{prefix}_TIMEOUT) as client:
+        for item in items:
+            # Prompt и сообщения формируются отдельно для каждого входного item.
+            payload = {{
+                **config.{prefix}_OPTIONS,
+                "model": config.{prefix}_MODEL,
+                "messages": [
+                    {{"role": "system", "content": {system.code}}},
+                    {{"role": "user", "content": {prompt.code}}},
+                ],
+            }}
+            headers = {{"Content-Type": "application/json"}}
+            headers[config.{prefix}_API_KEY_HEADER] = f"{{config.{prefix}_API_KEY_PREFIX}}{{config.{prefix}_API_KEY}}"
+            # Количество попыток включает первый запрос; пауза растёт до 8 секунд.
+            for attempt in range(config.{prefix}_MAX_RETRIES + 1):
+                try:
+                    response = await client.post(
+                        config.{prefix}_API_URL,
+                        headers=headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    break
+                except httpx.HTTPError:
+                    if attempt >= config.{prefix}_MAX_RETRIES:
+                        raise
+                    await asyncio.sleep(min(2 ** attempt, 8))
             try:
-                response = httpx.post(
-                    config.{prefix}_API_URL,
-                    headers=headers,
-                    json=payload,
-                    timeout=config.{prefix}_TIMEOUT,
-                )
-                response.raise_for_status()
-                break
-            except httpx.HTTPError:
-                if attempt >= config.{prefix}_MAX_RETRIES:
-                    raise
-                time.sleep(min(2 ** attempt, 8))
-        try:
-            content = response.json()["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError("Ответ AI API не содержит choices[0].message.content") from exc
-        output.append({{"json": {{"output": content}}}})
+                content = response.json()["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise ValueError("Ответ AI API не содержит choices[0].message.content") from exc
+            output.append({{"json": {{"output": content}}}})
     return output
 '''
     return source, set(prompt.dependencies | system.dependencies), model_config

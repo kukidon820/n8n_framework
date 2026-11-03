@@ -336,7 +336,7 @@ def _generate_spreadsheet(
     }
     generated_function = textwrap.dedent(
         '''\
-        def __FUNCTION__(_items):
+        async def __FUNCTION__(_items):
             # Свернуть поля всех входных items в одну таблицу, как делает n8n.
             rows = [_flatten_json(item.get("json", {}) or {}) for item in _items]
             columns = list(dict.fromkeys(key for row in rows for key in row))
@@ -421,7 +421,7 @@ def _generate_text_file(node: dict[str, Any], function_name: str, check: Any) ->
         raise WorkflowError(f"Узел {name}: options.fileName должен быть строкой")
     module = _BINARY_HELPERS + textwrap.dedent(
         '''\
-        def __FUNCTION__(_items):
+        async def __FUNCTION__(_items):
             result = []
             for item in _items:
                 value = _get_path(item.get("json", {}), __SOURCE_FIELD__)
@@ -473,7 +473,7 @@ def _generate_json_file(node: dict[str, Any], function_name: str, check: Any) ->
         raise WorkflowError(f"Узел {name}: options.fileName должен быть строкой")
     module = _BINARY_HELPERS + textwrap.dedent(
         '''\
-        def __FUNCTION__(_items):
+        async def __FUNCTION__(_items):
             result = []
             source_items = [_items] if __MODE__ == "once" else [[item] for item in _items]
             for group in source_items:
@@ -563,7 +563,7 @@ def _generate_binary_file(node: dict[str, Any], function_name: str, check: Any) 
                     raise ValueError("некорректная строка base64") from error
             return base64.b64decode(encoded), detected_mime
 
-        def __FUNCTION__(_items):
+        async def __FUNCTION__(_items):
             result = []
             for item in _items:
                 value = _get_path(item.get("json", {}), __SOURCE_FIELD__)
@@ -675,7 +675,7 @@ def _generate_ical_file(
                 parsed = parsed.replace(tzinfo=timezone.utc)
             return parsed.astimezone(timezone.utc)
 
-        def __FUNCTION__(_items):
+        async def __FUNCTION__(_items):
             event = __EVENT__
             result = []
             for _item in _items:
@@ -815,7 +815,7 @@ def generate_file_node(
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
-def {function_name}(_items):
+async def {function_name}(_items):
     """Упаковать все binary-файлы item в один ZIP-архив.
 
     Внутренние имена берутся из fileName, архив добавляется рядом с исходными полями.
@@ -839,7 +839,7 @@ def {function_name}(_items):
 from zipfile import ZipFile
 
 
-def {function_name}(_items):
+async def {function_name}(_items):
     """Распаковать ZIP и создать binary-поле для каждого файла в архиве.
 
     Каталоги пропускаются; файлы получают имена ``file_0``, ``file_1`` и далее.
@@ -867,7 +867,7 @@ def {function_name}(_items):
             return f'''import base64
 
 
-def {function_name}(_items):
+async def {function_name}(_items):
     """Закодировать выбранные bytes в base64 и записать строку в JSON.
 
     keepSource определяет, переносится ли исходный JSON и binary в результат.
@@ -887,7 +887,7 @@ def {function_name}(_items):
             check(options, {"encoding", "stripBOM"})
             encoding = options.get("encoding", "utf8")
             strip = options.get("stripBOM", False)
-            return f'''def {function_name}(_items):
+            return f'''async def {function_name}(_items):
     """Декодировать binary-поле указанной кодировкой и записать текст в JSON.
 
     Если stripBOM включён, начальный символ BOM удаляется после декодирования.

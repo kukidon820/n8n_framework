@@ -75,6 +75,16 @@ def node_version_info(node: dict[str, Any]) -> dict[str, Any] | None:
             fallback = 1
         elif raw_version > 1.1:
             fallback = 1.1
+    elif kind == "n8n-nodes-base.wait":
+        supported = "1.0–1.1"
+        if "typeVersion" not in node:
+            return None  # Конвертер использует актуальное значение 1.1 по умолчанию.
+        if not numeric:
+            fallback = 1.1
+        elif raw_version < 1:
+            fallback = 1
+        elif raw_version > 1.1:
+            fallback = 1.1
     elif kind == "n8n-nodes-base.httpRequest":
         if raw_version is not None and not numeric:
             supported = "числовая версия (fallback: 4)"

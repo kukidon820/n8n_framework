@@ -3,6 +3,7 @@
 Проверяются настройки модели, prompt и работа generated-кода без внешнего API.
 """
 
+import asyncio
 import sys
 from types import SimpleNamespace
 
@@ -43,6 +44,21 @@ def test_openrouter_agent_prompt_and_settings(monkeypatch):
                                json=lambda: {"choices": [{"message": {"content": "отчёт"}}]})
 
     monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(post=post, HTTPError=Exception))
+
+    class AsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            return post(url, timeout=self.timeout, **kwargs)
+
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=AsyncClient, HTTPError=Exception))
     prefix = "OPENROUTER_CHAT_MODEL"
     config = SimpleNamespace(**{
         f"{prefix}_API_URL": "https://openrouter.ai/api/v1/chat/completions",
@@ -58,8 +74,8 @@ def test_openrouter_agent_prompt_and_settings(monkeypatch):
     source, refs, model_config = generate_ai_agent(agent, model, "run", prefix)
     namespace = {}
     exec(source, namespace)
-    result = namespace["run"]([{"json": {"csv_text": "a;b"}}],
-        {"Python - Build CSV": [{"json": {"summary": {"total": 2}}}]}, {})
+    result = asyncio.run(namespace["run"]([{"json": {"csv_text": "a;b"}}],
+        {"Python - Build CSV": [{"json": {"summary": {"total": 2}}}]}, {}))
     assert refs == {"Python - Build CSV"}
     assert result == [{"json": {"output": "отчёт"}}]
     request = calls[0][1]
