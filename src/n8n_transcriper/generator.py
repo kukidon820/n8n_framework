@@ -6,6 +6,7 @@
 при запуске.
 """
 
+import copy
 import hashlib
 import json
 import keyword
@@ -135,21 +136,27 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
     # но сама модель не становится отдельным вызовом в main.py.
     connections_data = workflow.get("connections", {})
     model_nodes: set[str] = set()
-    agent_models: dict[str, str] = {}
+    agent_model_sources: dict[str, list[str]] = {}
+    agent_auxiliary_channels: dict[str, set[str]] = {}
     if isinstance(connections_data, dict):
         for source, channels in connections_data.items():
             if not isinstance(channels, dict):
                 continue
-            model_outputs = channels.get("ai_languageModel")
-            if not isinstance(model_outputs, list):
-                continue
-            for output in model_outputs:
-                if not isinstance(output, list):
+            for channel, outputs in channels.items():
+                if channel == "main" or not isinstance(outputs, list):
                     continue
-                for target in output:
-                    if isinstance(target, dict) and isinstance(target.get("node"), str):
-                        model_nodes.add(source)
-                        agent_models[target["node"]] = source
+                for output in outputs:
+                    if not isinstance(output, list):
+                        continue
+                    for target in output:
+                        if not isinstance(target, dict) or not isinstance(target.get("node"), str):
+                            continue
+                        target_name = target["node"]
+                        if channel == "ai_languageModel":
+                            model_nodes.add(source)
+                            agent_model_sources.setdefault(target_name, []).append(source)
+                        else:
+                            agent_auxiliary_channels.setdefault(target_name, set()).add(channel)
 
     issues: list[tuple[str | None, str]] = []
     nodes = workflow.get("nodes", [])
@@ -240,12 +247,19 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
             elif kind == "n8n-nodes-base.splitInBatches":
                 generate_loop_node(conversion_node)
             elif kind == "@n8n/n8n-nodes-langchain.agent":
-                model_name = agent_models.get(name)
-                model = nodes_by_name.get(model_name) if model_name else None
+                model_names = agent_model_sources.get(name, [])
+                unsupported_channels = sorted(agent_auxiliary_channels.get(name, set()))
+                if unsupported_channels:
+                    issues.append((name, f"{label}: подключение(я) {', '.join(unsupported_channels)} не поддерживаются; AI Agent нельзя перевести."))
+                if len(model_names) != 1:
+                    issues.append((name, f"{label}: требуется ровно одно соединение ai_languageModel, найдено {len(model_names)}."))
+                    continue
+                model = nodes_by_name.get(model_names[0])
                 if model is None:
-                    issues.append((name, f"{label}: не подключена chat-модель через ai_languageModel."))
+                    issues.append((name, f"{label}: не найдена подключённая chat-модель."))
                 else:
-                    generate_ai_agent(conversion_node, model, "run_node", "VALIDATION_MODEL")
+                    if not unsupported_channels:
+                        generate_ai_agent(conversion_node, model, "run_node", "VALIDATION_MODEL")
             elif kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
                 generate_condition_node(conversion_node, "run_node")
         except Exception as exc:
@@ -263,6 +277,256 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
         for name in email_smtp_credentials:
             issues.append((name, f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются."))
     return issues
+
+
+def _prepare_partial_workflow(
+    workflow: dict[str, Any],
+    forced_skips: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
+    """Исключить непереводимые узлы, соединить их соседей и вернуть причины пропуска.
+
+    Соединения через удаляемые узлы сворачиваются до ближайших оставшихся узлов.
+    Для цикла с пропущенным телом путь не добавляется повторно, чтобы не создавать
+    некорректный self-loop. Входной workflow остается неизменным.
+    """
+    source_nodes = {
+        node.get("name"): node
+        for node in workflow.get("nodes", [])
+        if isinstance(node, dict) and isinstance(node.get("name"), str)
+    }
+    skip_reasons: dict[str, list[str]] = {}
+
+    def skip(name: str, reason: str) -> None:
+        if name in source_nodes:
+            reasons = skip_reasons.setdefault(name, [])
+            if reason not in reasons:
+                reasons.append(reason)
+
+    for name, reason in (forced_skips or {}).items():
+        skip(name, reason)
+
+    for name, reason in node_conversion_issues(workflow):
+        if name is not None:
+            skip(name, reason)
+
+    edges = connections(workflow)
+    model_edges_by_agent: dict[str, list[Connection]] = {}
+    model_agents_by_source: dict[str, set[str]] = {}
+    auxiliary_channels_by_agent: dict[str, set[str]] = {}
+    for edge in edges:
+        target_node = source_nodes.get(edge.target, {})
+        if edge.channel == "ai_languageModel":
+            if (
+                target_node.get("type") != "@n8n/n8n-nodes-langchain.agent"
+                or edge.target_type != "ai_languageModel"
+            ):
+                skip(edge.target, f"Соединение {edge.channel} имеет неподдерживаемый получатель; соединение пропущено.")
+                continue
+            model_edges_by_agent.setdefault(edge.target, []).append(edge)
+            model_agents_by_source.setdefault(edge.source, set()).add(edge.target)
+        elif edge.channel != "main":
+            auxiliary_channels_by_agent.setdefault(edge.target, set()).add(edge.channel)
+            skip(
+                edge.target,
+                f"Соединение {edge.channel} не поддерживается; связанный узел пропущен.",
+            )
+
+    agent_type = "@n8n/n8n-nodes-langchain.agent"
+    for name, node in source_nodes.items():
+        if node.get("type") != agent_type:
+            continue
+        model_edges = model_edges_by_agent.get(name, [])
+        if len(model_edges) != 1:
+            skip(name, f"AI Agent требует одно соединение ai_languageModel; найдено: {len(model_edges)}.")
+        channels = sorted(auxiliary_channels_by_agent.get(name, set()))
+        if channels:
+            skip(name, f"AI Agent содержит неподдерживаемые соединения: {', '.join(channels)}.")
+
+    for model_name, agent_names in model_agents_by_source.items():
+        if len(agent_names) > 1:
+            for agent_name in agent_names:
+                skip(agent_name, f"Chat Model {model_name} подключена к нескольким AI Agent и не может быть переведена.")
+
+    original_main_edges = [edge for edge in edges if edge.channel == "main"]
+    original_outgoing: dict[str, list[Connection]] = {}
+    for edge in original_main_edges:
+        original_outgoing.setdefault(edge.source, []).append(edge)
+    try:
+        feedback_edges = set(loop_feedback_edges(workflow))
+    except WorkflowError:
+        feedback_edges = set()
+    for loop_name, node in source_nodes.items():
+        if node.get("type") != "n8n-nodes-base.splitInBatches" or loop_name in skip_reasons:
+            continue
+        loop_settings = generate_loop_node(compatible_node(node))
+        pending = [
+            edge.target for edge in original_outgoing.get(loop_name, [])
+            if edge.output == loop_settings.loop_output
+        ]
+        body_nodes: set[str] = set()
+        visited: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == loop_name or current in visited:
+                continue
+            visited.add(current)
+            body_nodes.add(current)
+            pending.extend(
+                edge.target for edge in original_outgoing.get(current, [])
+                if edge not in feedback_edges and edge.target != loop_name
+            )
+        if body_nodes and body_nodes <= set(skip_reasons):
+            skip(
+                loop_name,
+                "Тело Loop Over Items целиком состоит из непереводимых узлов; цикл пропущен.",
+            )
+
+    skipped_agents = {
+        name for name, node in source_nodes.items()
+        if node.get("type") == agent_type and name in skip_reasons
+    }
+    all_model_sources = set(model_agents_by_source)
+    retained_model_sources = {
+        source
+        for source, agent_names in model_agents_by_source.items()
+        if agent_names - skipped_agents
+    }
+    for model_name in all_model_sources - retained_model_sources:
+        skip(model_name, "Chat Model пропущена, поскольку подключённый к ней AI Agent нельзя перевести.")
+
+    if not skip_reasons:
+        return workflow, []
+
+    removed = set(skip_reasons)
+    outgoing: dict[str, list[Connection]] = {}
+    for edge in edges:
+        if edge.channel == "main":
+            outgoing.setdefault(edge.source, []).append(edge)
+
+    rewritten: dict[str, dict[str, list[list[dict[str, Any]]]]] = {}
+    emitted: set[tuple[str, int, str, int]] = set()
+
+    def add_edge(source: str, output: int, target: str, target_input: int) -> None:
+        key = (source, output, target, target_input)
+        if key in emitted:
+            return
+        emitted.add(key)
+        channels = rewritten.setdefault(source, {})
+        outputs = channels.setdefault("main", [])
+        while len(outputs) <= output:
+            outputs.append([])
+        outputs[output].append({"node": target, "type": "main", "index": target_input})
+
+    def forward(
+        source: str,
+        source_output: int,
+        target: str,
+        target_input: int,
+        visited: frozenset[str],
+    ) -> None:
+        if target not in removed:
+            add_edge(source, source_output, target, target_input)
+            return
+        if target in visited:
+            return
+        next_visited = visited | {target}
+        for next_edge in outgoing.get(target, []):
+            forward(source, source_output, next_edge.target, next_edge.input, next_visited)
+
+    for edge in edges:
+        if edge.channel == "main" and edge.source not in removed:
+            forward(edge.source, edge.output, edge.target, edge.input, frozenset())
+        elif (
+            edge.channel == "ai_languageModel"
+            and edge.source not in removed
+            and edge.target not in removed
+            and edge.target_type == "ai_languageModel"
+        ):
+            channels = rewritten.setdefault(edge.source, {})
+            outputs = channels.setdefault(edge.channel, [])
+            while len(outputs) <= edge.output:
+                outputs.append([])
+            outputs[edge.output].append({
+                "node": edge.target,
+                "type": edge.target_type,
+                "index": edge.input,
+            })
+
+    candidate = copy.deepcopy(workflow)
+    candidate["nodes"] = [
+        node for node in workflow["nodes"]
+        if isinstance(node, dict) and node.get("name") not in removed
+    ]
+    candidate["connections"] = rewritten
+    notes = [
+        (
+            str(node.get("name", "<без имени>")),
+            str(node.get("type", "<неизвестный тип>")),
+            "; ".join(skip_reasons[node["name"]]),
+        )
+        for node in workflow["nodes"]
+        if isinstance(node, dict) and node.get("name") in skip_reasons
+    ]
+    return candidate, notes
+
+
+def _append_skipped_part_notes(
+    files: dict[str, str], skipped_parts: list[tuple[str, str, str]]
+) -> None:
+    """Add explicit source comments and documentation for every omitted n8n part."""
+    if not skipped_parts:
+        return
+
+    safe_notes = [
+        (name.replace("\r", " ").replace("\n", " "),
+         kind.replace("\r", " ").replace("\n", " "),
+         reason.replace("\r", " ").replace("\n", " "))
+        for name, kind, reason in skipped_parts
+    ]
+    comment_lines = [
+        "# Часть исходного workflow пропущена: конвертер не смог перевести её поведение.",
+        "# Связи через пропущенные узлы упрощены; проверьте входные данные оставшихся узлов.",
+        *(
+            f"# Не переведён узел {name!r} ({kind}): {reason}"
+            for name, kind, reason in safe_notes
+        ),
+    ]
+    main = files.get("main.py", "")
+    marker = "def run(input_data=None):"
+    if marker in main:
+        files["main.py"] = main.replace(marker, "\n".join(comment_lines) + "\n\n" + marker, 1)
+    else:
+        files["main.py"] = "\n".join(comment_lines) + "\n\n" + main
+
+    markdown_notes = "\n".join(
+        f"- **{name}** (`{kind}`): {reason}" for name, kind, reason in safe_notes
+    )
+    files["README.md"] = files.get("README.md", "") + (
+        "\n## Не переведённые части workflow\n\n"
+        "Эти узлы и их операции не включены в Python-проект. Связи через них упрощены, "
+        "а их исходное поведение нужно реализовать вручную.\n\n"
+        + markdown_notes
+        + "\n"
+    )
+    files["conversion_report.md"] = files.get("conversion_report.md", "") + (
+        f"\n\nПропущено частей workflow: {len(safe_notes)}.\n\n{markdown_notes}\n"
+    )
+
+
+def _write_project_files(files: dict[str, str], output: Path | None) -> None:
+    """Write generated project files after all partial-conversion notes are added."""
+    if output is None:
+        return
+    output = Path(output)
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+        raise WorkflowError(f"Каталог назначения не пуст: {output}")
+    for path, content in files.items():
+        target = output / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        newline = "\r\n" if path == "run.bat" else "" if path == "run.sh" else None
+        target.write_text(content, encoding="utf-8", newline=newline)
+        if path == "run.sh" and os.name != "nt":
+            target.chmod(target.stat().st_mode | 0o111)
 
 
 def _linked_item_nodes(value: Any) -> set[str]:
@@ -478,26 +742,23 @@ def _loop_layout(
     }
 
 
-def generate_project(workflow: dict[str, Any], output: Path | None = None) -> dict[str, str]:
+def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
     """Скомпилировать workflow в набор файлов самостоятельного Python-проекта.
 
     Функция сначала проверяет структуру графа и поддерживаемость узлов, затем
     генерирует модуль каждого узла и собирает вызовы в ``main.py``. Все
     expressions разбираются на этом этапе; исходный JSON не нужен при запуске.
 
-    Args:
-        workflow: Словарь, загруженный из JSON n8n.
-        output: Необязательная пустая папка для записи файлов. Если не задана,
-            содержимое файлов возвращается только в памяти.
-
     Returns:
         Словарь ``относительный путь -> текст файла``. Его используют CLI,
         проверка синтаксиса и тесты generated-проекта.
 
     Raises:
-        WorkflowError: если граф или параметры не поддерживаются либо папка
-            назначения уже содержит файлы.
+        WorkflowError: если основная структура графа не может быть собрана.
     """
+    if not workflow.get("nodes"):
+        raise WorkflowError("Нельзя построить проект без узлов")
+
     # Разделяем вспомогательные AI-связи и обычные main-рёбра до сортировки графа.
     edges = connections(workflow)
     nodes = {node["name"]: node for node in workflow["nodes"]}
@@ -508,14 +769,26 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     models: dict[str, str] = {}
     auxiliary = [edge for edge in edges if edge.channel != "main"]
     for edge in auxiliary:
-        if (edge.channel != "ai_languageModel" or edge.target_type != "ai_languageModel" or
-                edge.output != 0 or edge.input != 0 or edge.target in models or
-                nodes[edge.target]["type"] != "@n8n/n8n-nodes-langchain.agent"):
-            raise WorkflowError("Поддерживается одно соединение ai_languageModel на AI Agent; другие дополнительные соединения пока не поддерживаются")
+        if edge.channel != "ai_languageModel":
+            raise WorkflowError(
+                f"Узел {edge.target}: дополнительное соединение {edge.channel} не поддерживается"
+            )
+        if (
+            edge.target_type != "ai_languageModel"
+            or edge.output != 0
+            or edge.input != 0
+            or edge.target in models
+            or nodes[edge.target]["type"] != "@n8n/n8n-nodes-langchain.agent"
+        ):
+            raise WorkflowError(
+                f"Узел {edge.target}: неподдерживаемое соединение ai_languageModel "
+                "(ожидается одно подключение к входу 0)"
+            )
         models[edge.target] = edge.source
     model_names = set(models.values())
     if len(model_names) != len(models):
-        raise WorkflowError("Одна модель не может быть подключена к нескольким агентам")
+        agents = ", ".join(sorted(models))
+        raise WorkflowError(f"Узлы {agents}: одна chat-модель не может быть подключена к нескольким AI Agent")
     all_main_edges = [edge for edge in edges if edge.channel == "main"]
     if any(edge.target_type != "main" or edge.source in model_names or edge.target in model_names or (edge.input != 0 and nodes[edge.target]["type"] != "n8n-nodes-base.merge") for edge in all_main_edges):
         raise WorkflowError("Неподдерживаемые основные соединения")
@@ -1312,19 +1585,171 @@ def _clean_items(items):
     files["conversion_report.md"] = (f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. '
         f'Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n\n'
         f'Настройки авторизации: {credentials}.' + version_report + '\n')
-    # Без output возвращаем файловый снимок для validate и тестов; иначе пишем его на диск.
-    if output is None:
-        return files
+    return files
 
-    output = Path(output)
-    if output.exists() and (not output.is_dir() or any(output.iterdir())):
-        raise WorkflowError(f"Каталог назначения не пуст: {output}")
-    # Создаём только нужные workflow файлы и сохраняем переносимые окончания строк.
-    for path, content in files.items():
-        target = output / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        newline = "\r\n" if path == "run.bat" else "" if path == "run.sh" else None
-        target.write_text(content, encoding="utf-8", newline=newline)
-        if path == "run.sh" and os.name != "nt":
-            target.chmod(target.stat().st_mode | 0o111)
+
+def _empty_partial_project() -> dict[str, str]:
+    """Create normal project files when every executable workflow node was skipped."""
+    sample = {
+        "nodes": [{
+            "id": "partial-conversion-placeholder",
+            "name": "Partial conversion placeholder",
+            "type": "n8n-nodes-base.noOp",
+            "parameters": {},
+        }],
+        "connections": {},
+    }
+    files = _generate_supported_project(sample)
+    files = {
+        path: content for path, content in files.items()
+        if not path.startswith("operations/")
+    }
+    files["main.py"] = '''"""Точка входа частично сконвертированного workflow."""
+
+import logging
+import sys
+
+
+def run(input_data=None):
+    """Вернуть входные items, если все исполняемые узлы были пропущены."""
+    return input_data if input_data is not None else [{"json": {}}]
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)
+    run()
+'''
+    files["conversion_report.md"] = (
+        "# Отчёт о конвертации\n\nПреобразовано: 0. Все исполняемые узлы пропущены.\n"
+    )
+    return files
+
+
+def _node_named_in_error(workflow: dict[str, Any], error: str) -> str | None:
+    """Find a node explicitly identified in a conversion diagnostic."""
+    nodes = [
+        node for node in workflow.get("nodes", [])
+        if isinstance(node, dict) and isinstance(node.get("name"), str)
+    ]
+    match = re.search(r"(?:Узел|Node)\s+(.+?)(?::|,|$)", error, re.IGNORECASE)
+    if match:
+        named = match.group(1).strip().strip("'\"«»")
+        if any(node["name"] == named for node in nodes):
+            return named
+    matches = [node["name"] for node in nodes if node["name"] and node["name"] in error]
+    return max(matches, key=len) if len(matches) == 1 else None
+
+
+def _is_trigger_node(node: dict[str, Any]) -> bool:
+    """Return whether n8n intentionally excludes the node from execution."""
+    kind = node.get("type", "")
+    short_name = kind.rsplit(".", 1)[-1].lower() if isinstance(kind, str) else ""
+    return short_name.endswith("trigger") or kind == "n8n-nodes-base.webhook"
+
+
+def _update_partial_conversion_report(
+    files: dict[str, str],
+    original_nodes: Any,
+    original_count: int,
+    skipped_parts: list[tuple[str, str, str]],
+) -> None:
+    """Make report counts refer to the source workflow, not its filtered graph."""
+    report = files.get("conversion_report.md", "")
+    summary = re.search(
+        r"Узлов: \d+\. Преобразовано: (\d+)\. Моделей подключено: (\d+)\. Триггеров пропущено: (\d+)\.",
+        report,
+    )
+    converted = int(summary.group(1)) if summary else 0
+    model_count = int(summary.group(2)) if summary else 0
+    trigger_count = sum(
+        _is_trigger_node(node)
+        for node in original_nodes
+        if isinstance(node, dict)
+    ) if isinstance(original_nodes, list) else 0
+    source_summary = (
+        f"Узлов в исходном workflow: {original_count}. Преобразовано: {converted}. "
+        f"Моделей подключено: {model_count}. Триггеров пропущено: {trigger_count}. "
+        f"Частей с комментариями: {len(skipped_parts)}."
+    )
+    if summary:
+        report = report[:summary.start()] + source_summary + report[summary.end():]
+    elif report:
+        report = report.replace("Преобразовано: 0. Все исполняемые узлы пропущены.", source_summary, 1)
+    else:
+        report = f"# Отчёт о конвертации\n\n{source_summary}\n"
+    files["conversion_report.md"] = report
+
+
+def generate_project(workflow: dict[str, Any], output: Path | None = None) -> dict[str, str]:
+    """Generate a project while recording and omitting untranslatable workflow parts.
+
+    When a node-specific conversion error occurs, that node is removed and the
+    remaining graph is compiled again. If a graph-level error has no node name,
+    the generator tries omitting each remaining node in turn. It still returns
+    a runnable project shell and an explicit report if no subgraph can be built.
+    """
+    original = copy.deepcopy(workflow)
+    original_nodes = original.get("nodes", []) if isinstance(original, dict) else []
+    original_count = len(original_nodes) if isinstance(original_nodes, list) else 0
+    if original_count == 0:
+        raise WorkflowError("Workflow не содержит узлов")
+
+    forced_skips: dict[str, str] = {}
+    candidate, skipped_parts = _prepare_partial_workflow(original, forced_skips)
+    files: dict[str, str] | None = None
+    last_error: str | None = None
+
+    while candidate.get("nodes"):
+        try:
+            files = _generate_supported_project(candidate)
+            break
+        except Exception as exc:
+            last_error = str(exc) or f"{type(exc).__name__}: ошибка конвертера"
+            culprit = _node_named_in_error(candidate, last_error)
+            if culprit is not None and culprit not in forced_skips:
+                forced_skips[culprit] = f"Ошибка конвертации узла: {last_error}"
+                candidate, skipped_parts = _prepare_partial_workflow(original, forced_skips)
+                continue
+
+            # A graph-level diagnostic may not identify its source node.
+            # Find a single omission that makes the rest of the graph compilable.
+            for node in candidate.get("nodes", []):
+                if not isinstance(node, dict) or not isinstance(node.get("name"), str):
+                    continue
+                name = node["name"]
+                if name in forced_skips or _is_trigger_node(node):
+                    continue
+                trial_skips = dict(forced_skips)
+                trial_skips[name] = (
+                    f"Общая схема workflow не собралась ({last_error}); узел пропущен."
+                )
+                trial, trial_notes = _prepare_partial_workflow(original, trial_skips)
+                if not trial.get("nodes"):
+                    continue
+                try:
+                    trial_files = _generate_supported_project(trial)
+                except Exception:
+                    continue
+                forced_skips = trial_skips
+                candidate, skipped_parts, files = trial, trial_notes, trial_files
+                break
+            if files is not None:
+                break
+
+            # No single node can repair the graph. Keep the conversion result
+            # usable and document why the remaining graph was omitted.
+            for node in candidate.get("nodes", []):
+                if isinstance(node, dict) and isinstance(node.get("name"), str):
+                    forced_skips.setdefault(
+                        node["name"],
+                        f"Граф workflow не удалось собрать ({last_error}); узел не включён в проект.",
+                    )
+            candidate, skipped_parts = _prepare_partial_workflow(original, forced_skips)
+            break
+
+    if files is None:
+        files = _empty_partial_project()
+    _update_partial_conversion_report(files, original_nodes, original_count, skipped_parts)
+    _append_skipped_part_notes(files, skipped_parts)
+    _write_project_files(files, output)
     return files

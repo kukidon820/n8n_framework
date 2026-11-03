@@ -40,12 +40,15 @@ def test_merge_append_preserves_input_order(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_merge_without_all_inputs_fails(tmp_path):
+def test_merge_without_all_inputs_is_omitted_with_a_diagnostic(tmp_path):
     workflow = {"nodes": [node("Start", "return _items"),
         {"id": "m", "name": "Merge", "type": "n8n-nodes-base.merge", "typeVersion": 3, "parameters": {}}],
         "connections": {"Start": {"main": [[edge("Merge")]]}}}
-    with pytest.raises(WorkflowError, match="каждый вход"):
-        generate_project(workflow, tmp_path / "output")
+    output = tmp_path / "output"
+    files = generate_project(workflow, output)
+    assert (output / "main.py").exists()
+    assert "Merge" in files["main.py"]
+    assert "вход" in files["main.py"]
 
 
 def make_combine(combine_by, options=None, **params):

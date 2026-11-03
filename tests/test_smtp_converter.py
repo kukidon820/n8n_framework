@@ -173,7 +173,7 @@ def test_email_send_rejects_unknown_options_and_missing_credentials():
         generate_email_send_node(node, "send_email")
 
 
-def test_email_send_rejects_multiple_smtp_credentials_in_one_project(tmp_path):
+def test_email_send_nodes_with_multiple_smtp_credentials_are_reported_and_skipped(tmp_path):
     first = email_send_node()
     second = email_send_node()
     second["id"] = "email-send-2"
@@ -186,8 +186,11 @@ def test_email_send_rejects_multiple_smtp_credentials_in_one_project(tmp_path):
         },
     }
 
-    with pytest.raises(ValueError, match="несколько SMTP credentials"):
-        generate_project(workflow, tmp_path / "generated")
+    output = tmp_path / "generated"
+    files = generate_project(workflow, output)
+    assert (output / "main.py").exists()
+    assert "несколько SMTP credentials" in files["main.py"]
+    assert "Send Email 2" in files["main.py"]
 
 
 def test_gmail_send_endpoint_generates_smtp_config_and_sender(tmp_path, monkeypatch):

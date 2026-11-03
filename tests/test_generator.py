@@ -106,15 +106,17 @@ def test_generated_main_writes_info_logs_to_stdout_and_includes_platform_launche
         subprocess.run(["sh", "-n", str(output / "run.sh")], check=True)
 
 
-def test_unsupported_example_fails_without_partial_output(tmp_path):
+def test_unsupported_node_is_omitted_with_a_diagnostic(tmp_path):
     output = tmp_path / "generated"
     workflow = {"nodes": [{
         "id": "http", "name": "HTTP", "type": "n8n-nodes-base.httpRequest",
         "parameters": {"url": "https://example.com", "unsupportedOption": True},
     }], "connections": {}}
-    with pytest.raises(WorkflowError, match="unsupportedOption"):
-        generate_project(workflow, output)
-    assert not output.exists()
+    files = generate_project(workflow, output)
+    assert (output / "main.py").exists()
+    assert "HTTP" in files["main.py"]
+    assert "unsupportedOption" in files["main.py"]
+    assert "http_requests/" not in "\n".join(files)
 
 
 def test_generated_set_reads_previous_node(tmp_path):
@@ -271,12 +273,13 @@ def test_empty_output_stops_linear_chain(tmp_path):
 
 
 @pytest.mark.parametrize("setting,value", [("disabled", True), ("alwaysOutputData", "true"), ("executeOnce", 1), ("onError", "continueRegularOutput"), ("retryOnFail", True)])
-def test_unimplemented_execution_settings_fail_before_writing(tmp_path, setting, value):
+def test_unimplemented_execution_settings_are_reported_and_omitted(tmp_path, setting, value):
     node = {"id": "1", "name": "Code", "type": "n8n-nodes-base.code", "parameters": {"language": "pythonNative", "pythonCode": "return _items"}, setting: value}
     output = tmp_path / "out"
-    with pytest.raises(WorkflowError, match=setting):
-        generate_project({"nodes": [node], "connections": {}}, output)
-    assert not output.exists()
+    files = generate_project({"nodes": [node], "connections": {}}, output)
+    assert (output / "main.py").exists()
+    assert setting in files["main.py"]
+    assert "Не переведён узел 'Code'" in files["main.py"]
 
 
 def test_fanout_branches_use_same_source(tmp_path):
