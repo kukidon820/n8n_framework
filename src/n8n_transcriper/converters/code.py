@@ -45,15 +45,18 @@ def generate_code_node(node: dict[str, Any], function_name: str) -> str:
         raise WorkflowError(f"Узел {name}: неподдерживаемый режим {mode!r}")
     # Отступ добавляется только для вложения неизменённого исходника в функцию.
     body = textwrap.indent(code.rstrip(), "    ")
-    source = f'def {function_name}(_items):\n    """Выполнить исходный Python Code Node для всех items."""\n{body}\n'
+    source = f'async def {function_name}(_items):\n    """Выполнить исходный Python Code Node для всех items."""\n{body}\n'
     if mode == "runOnceForEachItem":
         source = (
-            f"def {function_name}(_items):\n"
+            f"async def {function_name}(_items):\n"
             '    """Запустить исходный Python Code Node для каждого item."""\n'
-            "    def run_item(_item):\n"
+            "    async def run_item(_item):\n"
             '        """Выполнить исходное тело узла для одного item."""\n'
             f"{textwrap.indent(code.rstrip(), '        ')}\n"
-            "    return [run_item(item) for item in _items]\n"
+            "    result = []\n"
+            "    for item in _items:\n"
+            "        result.append(await run_item(item))\n"
+            "    return result\n"
         )
     # Проверяем готовую обёртку Python-парсером до записи файлов на диск.
     try:

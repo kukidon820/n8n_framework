@@ -3,6 +3,7 @@
 Подменённые клиенты позволяют проверять заголовки, тело, авторизацию, retry и ответы.
 """
 
+import asyncio
 import sys
 from types import SimpleNamespace
 
@@ -15,6 +16,25 @@ from n8n_transcriper.converters.http import (
 )
 from n8n_transcriper.reader import WorkflowError
 from n8n_transcriper.generator import generate_project
+
+
+def adapt_async_client(client_factory):
+    """Adapt synchronous test doubles to the generated AsyncClient interface."""
+    class AsyncClientAdapter:
+        def __init__(self, **options):
+            self.client = client_factory(**options)
+
+        async def __aenter__(self):
+            self.client.__enter__()
+            return self
+
+        async def __aexit__(self, *args):
+            return self.client.__exit__(*args)
+
+        async def request(self, *args, **kwargs):
+            return self.client.request(*args, **kwargs)
+
+    return AsyncClientAdapter
 
 
 def test_real_http_node_retries_and_splits_json(monkeypatch):
@@ -47,11 +67,14 @@ def test_real_http_node_retries_and_splits_json(monkeypatch):
                 raise HTTPError("temporary")
             return SimpleNamespace(raise_for_status=lambda: None, json=lambda: [{"id": 1}, {"id": 2}], content=b"json")
 
-    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=HTTPError))
-    monkeypatch.setattr("time.sleep", sleeps.append)
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=adapt_async_client(Client), HTTPError=HTTPError))
+    async def record_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("asyncio.sleep", record_sleep)
     namespace = {}
     exec(generate_http_node(node, "get_todos"), namespace)
-    assert namespace["get_todos"]([{"json": {}}], {}, {}) == [{"json": {"id": 1}}, {"json": {"id": 2}}]
+    assert asyncio.run(namespace["get_todos"]([{"json": {}}], {}, {})) == [{"json": {"id": 1}}, {"json": {"id": 2}}]
     assert len(calls) == 2
     assert calls[-1][0:2] == ("GET", "https://jsonplaceholder.typicode.com/todos")
     assert sleeps == [2.0]
@@ -76,8 +99,11 @@ def test_transport_options_batching_and_autodetect(monkeypatch):
                 return SimpleNamespace(raise_for_status=lambda: None, headers={"content-type": "text/plain"}, text="hello")
             return SimpleNamespace(raise_for_status=lambda: None, headers={"content-type": "application/pdf"}, content=b"pdf")
 
-    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=Exception))
-    monkeypatch.setattr("time.sleep", sleeps.append)
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=adapt_async_client(Client), HTTPError=Exception))
+    async def record_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("asyncio.sleep", record_sleep)
     node = {"name": "HTTP", "typeVersion": 4.2, "parameters": {"url": "https://example.com", "sendHeaders": True,
         "headerParameters": {"parameters": [{"name": "X-Test", "value": "v"}]},
         "options": {"batching": {"batch": {"batchSize": 1, "batchInterval": 250}},
@@ -86,7 +112,7 @@ def test_transport_options_batching_and_autodetect(monkeypatch):
                     "proxy": "http://proxy.example:8080"}}}
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    result = namespace["request"]([{"json": {"n": 1}}, {"json": {"n": 2}, "binary": {"old": {"data": b"a"}}}], {}, {})
+    result = asyncio.run(namespace["request"]([{"json": {"n": 1}}, {"json": {"n": 2}, "binary": {"old": {"data": b"a"}}}], {}, {}))
     assert result[0] == {"json": {"data": "hello"}}
     assert result[1]["json"] == {"n": 2}
     assert result[1]["binary"]["old"]["data"] == b"a"
@@ -121,12 +147,12 @@ def test_generic_credentials_from_config(monkeypatch, kind, values):
         "credentials": {kind: {"id": "credential", "name": "credential"}}}
     fields = http_credential_fields(node)
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields[key]: value for key, value in values.items()}))
-    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=Exception))
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=adapt_async_client(Client), HTTPError=Exception))
     source = generate_http_node(node, "request")
     assert "secret" not in source
     namespace = {}
     exec(source, namespace)
-    assert namespace["request"]([{"json": {}}], {}, {}) == [{"json": {}}]
+    assert asyncio.run(namespace["request"]([{"json": {}}], {}, {})) == [{"json": {}}]
     if kind == "httpBasicAuth":
         assert options[0]["auth"] == ("alice", "secret")
     else:
@@ -136,14 +162,14 @@ def test_generic_credentials_from_config(monkeypatch, kind, values):
 def test_header_credentials_protect_cross_origin_redirect(monkeypatch):
     import httpx
     requests = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     def handle(request):
         requests.append(request)
         if len(requests) == 1:
             return httpx.Response(302, headers={"Location": "https://other.example/path"})
         return httpx.Response(200, json={})
     transport = httpx.MockTransport(handle)
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {"name": "API", "typeVersion": 4.2, "parameters": {"url": "https://example.com",
         "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
         "options": {"response": {"response": {"responseFormat": "json"}}}},
@@ -152,7 +178,7 @@ def test_header_credentials_protect_cross_origin_redirect(monkeypatch):
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields["HEADER_NAME"]: "X-API-Key", fields["HEADER_VALUE"]: "secret"}))
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    assert namespace["request"]([{"json": {}}], {}, {}) == [{"json": {}}]
+    assert asyncio.run(namespace["request"]([{"json": {}}], {}, {})) == [{"json": {}}]
     assert requests[0].headers["x-api-key"] == "secret"
     assert "x-api-key" not in requests[1].headers
 
@@ -162,14 +188,14 @@ def test_header_credentials_protect_cross_origin_redirect(monkeypatch):
 def test_auth_is_removed_on_http_to_https_redirect(monkeypatch, kind, values):
     import httpx
     requests = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     def handle(request):
         requests.append(request)
         if len(requests) == 1:
             return httpx.Response(302, headers={"Location": "https://example.com/path"})
         return httpx.Response(200, json={})
     transport = httpx.MockTransport(handle)
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {"name": "API", "typeVersion": 4.2, "parameters": {"url": "http://example.com",
         "authentication": "genericCredentialType", "genericAuthType": kind,
         "options": {"response": {"response": {"responseFormat": "json"}}}},
@@ -178,7 +204,7 @@ def test_auth_is_removed_on_http_to_https_redirect(monkeypatch, kind, values):
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields[key]: value for key, value in values.items()}))
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    namespace["request"]([{"json": {}}], {}, {})
+    asyncio.run(namespace["request"]([{"json": {}}], {}, {}))
     assert "authorization" in requests[0].headers
     assert "authorization" not in requests[1].headers
 
@@ -187,7 +213,7 @@ def test_generic_query_auth_uses_config_and_is_removed_cross_origin(monkeypatch)
     import httpx
 
     requests = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
 
     def handle(request):
         requests.append(request)
@@ -196,7 +222,7 @@ def test_generic_query_auth_uses_config_and_is_removed_cross_origin(monkeypatch)
         return httpx.Response(200, json={})
 
     transport = httpx.MockTransport(handle)
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {"name": "API", "parameters": {"url": "https://example.com", "authentication": "genericCredentialType",
         "genericAuthType": "httpQueryAuth", "options": {"response": {"response": {"responseFormat": "json"}}}},
         "credentials": {"httpQueryAuth": {"id": "query-credential"}}}
@@ -206,7 +232,7 @@ def test_generic_query_auth_uses_config_and_is_removed_cross_origin(monkeypatch)
     source = generate_http_node(node, "request")
     assert "secret" not in source
     exec(source, namespace)
-    namespace["request"]([{"json": {}}], {}, {})
+    asyncio.run(namespace["request"]([{"json": {}}], {}, {}))
     assert requests[0].url.params["api_key"] == "secret"
     assert "api_key" not in requests[1].url.params
 
@@ -215,12 +241,12 @@ def test_cross_origin_credentials_can_be_explicitly_enabled(monkeypatch):
     import httpx
 
     requests = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     transport = httpx.MockTransport(lambda request: (
         requests.append(request),
         httpx.Response(302, headers={"Location": "https://other.example/path"}) if len(requests) == 1 else httpx.Response(200, json={}),
     )[1])
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {"name": "API", "typeVersion": 4.4, "parameters": {"url": "https://example.com",
         "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
         "options": {"sendCredentialsOnCrossOriginRedirect": True,
@@ -230,7 +256,7 @@ def test_cross_origin_credentials_can_be_explicitly_enabled(monkeypatch):
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{fields["HEADER_NAME"]: "X-API-Key", fields["HEADER_VALUE"]: "secret"}))
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    namespace["request"]([{"json": {}}], {}, {})
+    asyncio.run(namespace["request"]([{"json": {}}], {}, {}))
     assert requests[1].headers["x-api-key"] == "secret"
 
 
@@ -307,10 +333,10 @@ def test_static_secret_headers_without_credentials_use_config(tmp_path, monkeypa
                                    content=b"{}", json=lambda: {})
 
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{field: secret}))
-    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=Exception))
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=adapt_async_client(Client), HTTPError=Exception))
     namespace = {}
     exec(source, namespace)
-    namespace["request"]([{"json": {}}], {}, {})
+    asyncio.run(namespace["request"]([{"json": {}}], {}, {}))
     assert captured == [{"authorization": secret, "content-type": "application/json"}]
 
 
@@ -318,7 +344,7 @@ def test_custom_secret_header_is_removed_on_cross_origin_redirect(monkeypatch):
     import httpx
 
     requests = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
 
     def handle(request):
         requests.append(request)
@@ -327,7 +353,7 @@ def test_custom_secret_header_is_removed_on_cross_origin_redirect(monkeypatch):
         return httpx.Response(200, json={})
 
     transport = httpx.MockTransport(handle)
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {
         "id": "custom-auth-header",
         "name": "HTTP Request2",
@@ -344,7 +370,7 @@ def test_custom_secret_header_is_removed_on_cross_origin_redirect(monkeypatch):
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(**{field: "Bearer sample-secret-value"}))
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    namespace["request"]([{"json": {}}], {}, {})
+    asyncio.run(namespace["request"]([{"json": {}}], {}, {}))
 
     assert requests[0].headers["authorization"] == "Bearer sample-secret-value"
     assert "authorization" not in requests[1].headers
@@ -369,29 +395,29 @@ def test_request_body_formats(monkeypatch, body_parameters, expected):
         def request(self, method, url, **kwargs):
             calls.append(kwargs)
             return SimpleNamespace(raise_for_status=lambda: None, content=b"{}", json=lambda: {})
-    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(Client=Client, HTTPError=Exception))
+    monkeypatch.setitem(sys.modules, "httpx", SimpleNamespace(AsyncClient=adapt_async_client(Client), HTTPError=Exception))
     params = {"url": "https://example.com", "method": "POST", "sendBody": True,
               "options": {"response": {"response": {"responseFormat": "json"}}}, **body_parameters}
     namespace = {}
     exec(generate_http_node({"name": "HTTP", "parameters": params}, "request"), namespace)
     item = {"json": {"name": "A&B"}, "binary": {"file": {"data": b"hello", "fileName": "a.txt", "mimeType": "text/plain"}}}
-    namespace["request"]([item], {}, {})
+    asyncio.run(namespace["request"]([item], {}, {}))
     assert calls[0][expected[0]] == expected[1]
 
 
 def test_multipart_is_serialized_by_httpx_without_network(monkeypatch):
     import httpx
     requests = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     transport = httpx.MockTransport(lambda request: (requests.append(request), httpx.Response(200, json={}))[1])
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {"name": "Upload", "parameters": {"url": "https://example.com", "method": "POST", "sendBody": True,
         "contentType": "multipart-form-data", "bodyParameters": {"parameters": [
             {"name": "upload", "parameterType": "formBinaryData", "inputDataFieldName": "file"}]},
         "options": {"response": {"response": {"responseFormat": "json"}}}}}
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    namespace["request"]([{"json": {}, "binary": {"file": {"data": b"actual bytes", "fileName": "a.txt", "mimeType": "text/plain"}}}], {}, {})
+    asyncio.run(namespace["request"]([{"json": {}, "binary": {"file": {"data": b"actual bytes", "fileName": "a.txt", "mimeType": "text/plain"}}}], {}, {}))
     assert requests[0].headers["content-type"].startswith("multipart/form-data; boundary=")
     assert b'filename="a.txt"' in requests[0].content
     assert b"actual bytes" in requests[0].content
@@ -401,14 +427,17 @@ def test_pagination_fetches_pages_until_empty(monkeypatch):
     import httpx
     requests = []
     sleeps = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     def handle(request):
         requests.append(request)
         page = int(request.url.params["page"])
         return httpx.Response(200, json=[{"page": page}] if page < 3 else [])
     transport = httpx.MockTransport(handle)
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
-    monkeypatch.setattr("time.sleep", sleeps.append)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
+    async def record_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr("asyncio.sleep", record_sleep)
     node = {"name": "Pages", "parameters": {"url": "https://example.com/items", "options": {
         "response": {"response": {"responseFormat": "json"}},
         "pagination": {"pagination": {"paginationMode": "updateAParameterInEachRequest",
@@ -417,7 +446,7 @@ def test_pagination_fetches_pages_until_empty(monkeypatch):
             "requestInterval": 200}}}}}
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    assert namespace["request"]([{"json": {}}], {}, {}) == [{"json": {"page": 1}}, {"json": {"page": 2}}]
+    assert asyncio.run(namespace["request"]([{"json": {}}], {}, {})) == [{"json": {"page": 1}}, {"json": {"page": 2}}]
     assert [int(req.url.params["page"]) for req in requests] == [1, 2, 3]
     assert sleeps == [0.2, 0.2]
 
@@ -432,12 +461,12 @@ def test_pagination_requires_supported_completion():
 def test_pagination_follows_next_url(monkeypatch):
     import httpx
     seen = []
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     def handle(request):
         seen.append(str(request.url))
         return httpx.Response(200, json={"items": [len(seen)], "next": "https://example.com/page2" if len(seen) == 1 else None})
     transport = httpx.MockTransport(handle)
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {"name": "Pages", "parameters": {"url": "https://example.com/page1", "options": {
         "response": {"response": {"responseFormat": "json"}},
         "pagination": {"pagination": {"paginationMode": "responseContainsNextURL", "nextURL": "={{ $response.body.next }}",
@@ -445,21 +474,21 @@ def test_pagination_follows_next_url(monkeypatch):
             "limitPagesFetched": True, "maxRequests": 5}}}}}
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    result = namespace["request"]([{"json": {}}], {}, {})
+    result = asyncio.run(namespace["request"]([{"json": {}}], {}, {}))
     assert seen == ["https://example.com/page1", "https://example.com/page2"]
     assert [item["json"]["items"] for item in result] == [[1], [2]]
 
 
 def test_full_response_and_never_error(monkeypatch):
     import httpx
-    real_client = httpx.Client
+    real_client = httpx.AsyncClient
     transport = httpx.MockTransport(lambda request: httpx.Response(400, headers={"X-Test": "present"}, json=[{"id": 1}]))
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: real_client(transport=transport, **kwargs))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
     node = {"name": "HTTP", "parameters": {"url": "https://example.com", "options": {"response": {"response": {
         "responseFormat": "json", "fullResponse": True, "neverError": True}}}}}
     namespace = {}
     exec(generate_http_node(node, "request"), namespace)
-    result = namespace["request"]([{"json": {}}], {}, {})
+    result = asyncio.run(namespace["request"]([{"json": {}}], {}, {}))
     assert len(result) == 1
     assert result[0]["json"]["statusCode"] == 400
     assert result[0]["json"]["headers"]["x-test"] == "present"

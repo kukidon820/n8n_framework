@@ -3,6 +3,7 @@
 Тесты проверяют параметры запросов и транзакции с помощью mock-драйвера.
 """
 
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -26,27 +27,28 @@ def test_parameters_are_bound_not_interpolated(monkeypatch):
 
     class Cursor:
         description = [SimpleNamespace(name="id", type_code=20)]
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def execute(self, query, params): calls.append((query, params))
-        def fetchall(self): return [{"id": 123456789012345678}]
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def execute(self, query, params): calls.append((query, params))
+        async def fetchall(self): return [{"id": 123456789012345678}]
 
     class Connection:
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
         def cursor(self): return Cursor()
 
     database = ModuleType("database")
     database.__path__ = []
     postgres = ModuleType("database.postgres")
-    postgres.connect = lambda timeout: Connection()
+    async def connect(timeout): return Connection()
+    postgres.connect = connect
     monkeypatch.setitem(sys.modules, "database", database)
     monkeypatch.setitem(sys.modules, "database.postgres", postgres)
     code, _ = generate_postgres_node(postgres_node(), "run")
     namespace = {}
     exec(code, namespace)
     malicious = "x'; DROP TABLE users; --"
-    assert namespace["run"]([{"json": {"email": malicious}}], {}, {}) == [{"json": {"id": "123456789012345678"}}]
+    assert asyncio.run(namespace["run"]([{"json": {"email": malicious}}], {}, {})) == [{"json": {"id": "123456789012345678"}}]
     assert calls == [("SELECT id FROM users WHERE email = %(p1)s", {"p1": malicious})]
 
 
@@ -73,18 +75,19 @@ def test_multiple_parameters_are_bound_separately(monkeypatch):
     calls = []
     class Cursor:
         description = []
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def execute(self, query, params): calls.append((query, params))
-        def fetchall(self): return []
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def execute(self, query, params): calls.append((query, params))
+        async def fetchall(self): return []
     class Connection:
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
         def cursor(self): return Cursor()
     database = ModuleType("database")
     database.__path__ = []
     postgres = ModuleType("database.postgres")
-    postgres.connect = lambda timeout: Connection()
+    async def connect(timeout): return Connection()
+    postgres.connect = connect
     monkeypatch.setitem(sys.modules, "database", database)
     monkeypatch.setitem(sys.modules, "database.postgres", postgres)
     node = postgres_node()
@@ -93,11 +96,11 @@ def test_multiple_parameters_are_bound_separately(monkeypatch):
     code, _ = generate_postgres_node(node, "run")
     namespace = {}
     exec(code, namespace)
-    namespace["run"]([{"json": {"id": 7, "email": "a,b'"}}], {}, {})
+    asyncio.run(namespace["run"]([{"json": {"id": 7, "email": "a,b'"}}], {}, {}))
     assert calls == [("SELECT id FROM users WHERE id = %(p1)s AND email = %(p2)s", {"p1": 7, "p2": "a,b'"})]
     node["parameters"]["options"]["queryReplacement"] = "={{ $json.id }},={{ $json.email }}"
     exec(generate_postgres_node(node, "run")[0], namespace)
-    namespace["run"]([{"json": {"id": 8, "email": "x,y"}}], {}, {})
+    asyncio.run(namespace["run"]([{"json": {"id": 8, "email": "x,y"}}], {}, {}))
     assert calls[-1][1] == {"p1": 8, "p2": "x,y"}
 
 
@@ -107,20 +110,20 @@ def test_transaction_commits_all_or_rolls_back(monkeypatch):
     class Cursor:
         description = None
         def __init__(self, connection): self.connection = connection
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
-        def execute(self, query, params):
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def execute(self, query, params):
             assert query == "INSERT INTO users (email) VALUES (%(p1)s)"
             if params["p1"] == "bad":
                 raise RuntimeError("database failure")
             self.connection.pending.append(params["p1"])
     class Connection:
         def __init__(self): self.pending = []
-        def __enter__(self): return self
-        def __exit__(self, exc_type, *_):
+        async def __aenter__(self): return self
+        async def __aexit__(self, exc_type, *_):
             if exc_type is None: committed.extend(self.pending)
         def cursor(self): return Cursor(self)
-    def connect(timeout):
+    async def connect(timeout):
         connection = Connection()
         connections.append(connection)
         return connection
@@ -137,9 +140,9 @@ def test_transaction_commits_all_or_rolls_back(monkeypatch):
     namespace = {}
     exec(source, namespace)
     with pytest.raises(RuntimeError, match="database failure"):
-        namespace["run"]([{"json": {"email": "first"}}, {"json": {"email": "bad"}}], {}, {})
+        asyncio.run(namespace["run"]([{"json": {"email": "first"}}, {"json": {"email": "bad"}}], {}, {}))
     assert committed == []
     assert len(connections) == 1
-    assert namespace["run"]([{"json": {"email": "first"}}, {"json": {"email": "second"}}], {}, {}) == [
+    assert asyncio.run(namespace["run"]([{"json": {"email": "first"}}, {"json": {"email": "second"}}], {}, {})) == [
         {"json": {"success": True}}, {"json": {"success": True}}]
     assert committed == ["first", "second"]

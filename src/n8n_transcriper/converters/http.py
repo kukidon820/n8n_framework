@@ -83,7 +83,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     """Сгенерировать функцию HTTP Request с конкретными настройками узла.
 
     Параметры URL, headers, query, body, auth и ответа преобразуются в вызов
-    ``httpx.Client``. Поддерживаемые pagination и retry генерируются как явные
+    ``httpx.AsyncClient``. Поддерживаемые pagination и retry генерируются как явные
     циклы Python. Неизвестные параметры отклоняются, а секреты выносятся в config.
 
     Args:
@@ -349,12 +349,13 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
     # OAuth Gmail получает короткоживущий access token непосредственно перед запросом.
     auth_code = '''        if not all((config.GMAIL_CLIENT_ID, config.GMAIL_CLIENT_SECRET, config.GMAIL_REFRESH_TOKEN)):
             raise ValueError("Не заданы Gmail OAuth2 credentials")
-        token_response = httpx.post("https://oauth2.googleapis.com/token", data={
-            "client_id": config.GMAIL_CLIENT_ID,
-            "client_secret": config.GMAIL_CLIENT_SECRET,
-            "refresh_token": config.GMAIL_REFRESH_TOKEN,
-            "grant_type": "refresh_token",
-        }, timeout=30)
+        async with httpx.AsyncClient(timeout=30) as token_client:
+            token_response = await token_client.post("https://oauth2.googleapis.com/token", data={
+                "client_id": config.GMAIL_CLIENT_ID,
+                "client_secret": config.GMAIL_CLIENT_SECRET,
+                "refresh_token": config.GMAIL_REFRESH_TOKEN,
+                "grant_type": "refresh_token",
+            })
         token_response.raise_for_status()
         headers["Authorization"] = "Bearer " + token_response.json()["access_token"]
 ''' if gmail else ""
@@ -418,23 +419,23 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
             parts = urlsplit(str(url))
             return (parts.scheme.lower(), parts.hostname, parts.port or (443 if parts.scheme.lower() == "https" else 80))
         original_origin = origin(request_url)
-        def strip_credentials_on_redirect(request):
+        async def strip_credentials_on_redirect(request):
             if origin(request.url) != original_origin:
 {strip_header_lines}{strip_query_line}'''
         client_options += ', event_hooks={"request": [strip_credentials_on_redirect]}'
-    throttle = f'        if item_index and item_index % {batch_size} == 0:\n            time.sleep({batch_interval / 1000!r})\n' if batch_size > 0 and batch_interval > 0 else ''
+    throttle = f'        if item_index and item_index % {batch_size} == 0:\n            await asyncio.sleep({batch_interval / 1000!r})\n' if batch_size > 0 and batch_interval > 0 else ''
     lowercase = '        headers = {key.lower(): value for key, value in headers.items()}\n' if options.get("lowercaseHeaders", True) else ''
     # Один request block переиспользуется обычным вызовом и обеими pagination-стратегиями.
-    request_block = f'''{query_auth_code}        with httpx.Client({client_options}) as client:
+    request_block = f'''{query_auth_code}        async with httpx.AsyncClient({client_options}) as client:
             for attempt in range({tries}):
                 try:
-                    response = client.request({method.upper()!r}, request_url, params=page_params, headers=headers{body_argument})
+                    response = await client.request({method.upper()!r}, request_url, params=page_params, headers=headers{body_argument})
                     {"pass" if never_error else "response.raise_for_status()"}
                     break
                 except httpx.HTTPError:
                     if attempt + 1 == {tries}:
                         raise
-                    time.sleep({delay / 1000!r})
+                    await asyncio.sleep({delay / 1000!r})
 '''
     output_block = f'''{detect}        if response_format == "json":
             {json_output}
@@ -445,7 +446,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
 '''
     if page_config is not None and page_mode == "updateAParameterInEachRequest":
         fetch = (f'        for page_index in range({max_pages}):\n'
-                 f'            if page_index and {page_interval!r}:\n                time.sleep({page_interval / 1000!r})\n'
+                 f'            if page_index and {page_interval!r}:\n                await asyncio.sleep({page_interval / 1000!r})\n'
                  f'            page_params = dict({params})\n            page_params[{page_name!r}] = page_index + {page_offset}\n' +
                  textwrap.indent(request_block, '    ') +
                  '            page_data = response.json() if response.content.strip() else []\n'
@@ -453,7 +454,7 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
                  '            if not page_data:\n                break\n' + textwrap.indent(output_block, '    '))
     elif page_config is not None:
         fetch = (f'        for page_index in range({max_pages}):\n'
-                 f'            if page_index and {page_interval!r}:\n                time.sleep({page_interval / 1000!r})\n'
+                 f'            if page_index and {page_interval!r}:\n                await asyncio.sleep({page_interval / 1000!r})\n'
                  f'            page_params = dict({params})\n' + textwrap.indent(request_block, '    ') +
                  '            page_data = response.json() if response.content.strip() else {}\n'
                  '            if not isinstance(page_data, dict):\n                raise TypeError("Pagination ожидает JSON-объект")\n' +
@@ -471,15 +472,15 @@ def generate_http_node(node: dict[str, Any], function_name: str) -> str:
         f'    if not config.{field}:\n        raise ValueError({("Заполните " + field + " для секретного заголовка узла " + name)!r})\n'
         for field in secret_header_fields.values()
     )
-    return f'''import json
-import time
+    return f'''import asyncio
+import json
 from urllib.parse import urlencode, urlsplit
 
 import httpx
 {"import config" if gmail or credential_fields or secret_header_fields else ""}
 
 
-def {function_name}(items, results, execution):
+async def {function_name}(items, results, execution):
     """Выполнить сгенерированный запрос и вернуть результат для каждого item.
 
     Внутри функции применяются настроенные headers/body, повторы и pagination.

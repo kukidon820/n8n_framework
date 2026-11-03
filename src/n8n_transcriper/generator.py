@@ -122,34 +122,6 @@ def _manual_version_fallback_source(
     )
 
 
-def _asyncify_node_source(source: str, function_name: str) -> str:
-    """Экспортировать sync-реализацию узла как async-функцию.
-
-    Сетевые и другие блокирующие конвертеры пока сохраняют простой обычный
-    Python-код. Он запускается в отдельном worker thread, поэтому не блокирует
-    event loop сгенерированного проекта. Узлы с собственной async-реализацией
-    (Wait и Data Table) остаются нативно асинхронными.
-    """
-    async_pattern = re.compile(rf"(?m)^async def {re.escape(function_name)}\(")
-    if async_pattern.search(source):
-        return source
-
-    sync_pattern = re.compile(rf"(?m)^def {re.escape(function_name)}\(")
-    if not sync_pattern.search(source):
-        raise WorkflowError(
-            f"Не найдена функция узла {function_name}: невозможно создать async-вызов"
-        )
-    sync_name = f"_sync_{function_name}"
-    source = sync_pattern.sub(f"def {sync_name}(", source, count=1)
-    return (
-        "import asyncio\n\n"
-        + source.rstrip()
-        + f"\n\n\nasync def {function_name}(*args, **kwargs):\n"
-        + '    """Асинхронно выполнить блокирующую реализацию узла в worker thread."""\n'
-        + f"    return await asyncio.to_thread({sync_name}, *args, **kwargs)\n"
-    )
-
-
 def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
     """Независимо проверить настройки каждого узла для команды ``validate``.
 
@@ -958,6 +930,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     folder = "email_senders"
                     source, references = generate_smtp_node(conversion_node, function)
                     uses_smtp = True
+                    dependencies.add("aiosmtplib>=3.0")
                 else:
                     folder = "http_requests"
                     source = generate_http_node(conversion_node, function)
@@ -1009,6 +982,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     raise WorkflowError(f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются")
                 email_smtp_credential = credential_reference
                 uses_email_send = True
+                dependencies.add("aiosmtplib>=3.0")
                 missing = references - (completed & ancestors[name] if branching else completed)
                 if missing:
                     raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
@@ -1127,15 +1101,19 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             source = _manual_version_fallback_source(
                 node,
                 function,
-                asynchronous=kind == "n8n-nodes-base.dataTable",
+                asynchronous=True,
             )
             if kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
                 connected_ports = [edge.output for edge in main_edges if edge.source == name]
                 output_count = max(connected_ports, default=1) + 1
         if version_warning and kind != "n8n-nodes-base.splitInBatches":
             source = add_manual_parameter_to_source(source, function, version_warning)
-        if kind != "n8n-nodes-base.splitInBatches":
-            source = _asyncify_node_source(source, function)
+        if kind != "n8n-nodes-base.splitInBatches" and not re.search(
+            rf"(?m)^async def {re.escape(function)}\(", source
+        ):
+            raise WorkflowError(
+                f"Узел {name}: конвертер должен генерировать async-функцию {function}"
+            )
         call_arguments = arguments
         if manual_parameters is not None:
             call_arguments += f", n8n_manual_parameters={manual_parameters!r}"
@@ -1423,6 +1401,9 @@ def _clean_items(items):
     sync_wrapper = (
         "\n\ndef run(input_data=None):\n"
         "    \"\"\"Синхронная обёртка для ручного запуска асинхронного workflow.\"\"\"\n"
+        "    if sys.platform == \"win32\":\n"
+        "        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:\n"
+        "            return runner.run(run_async(input_data))\n"
         "    return asyncio.run(run_async(input_data))\n"
     )
     files["main.py"] = (
@@ -1647,7 +1628,7 @@ def _clean_items(items):
         'В интерактивном терминале эти скрипты ждут подтверждения после выполнения, чтобы оставить логи на экране.\n\n'
         '`main.py` можно импортировать из другого async-кода: `from main import run_async`, затем `await run_async(input_data)`. '
         'Для обычного ручного запуска доступна синхронная обёртка `run(input_data)`, которая создаёт event loop. '
-        'Все узлы вызываются асинхронно; блокирующие реализации узлов выполняются через `asyncio.to_thread`.\n'
+        'Каждый узел сгенерирован как async-функция с нативными async-клиентами для сетевых и базовых операций.\n'
     )
     files[".gitignore"] = '.env\n.env.*\n!.env.example\n__pycache__/\n*.pyc\n.venv/\n'
     version_report = (
@@ -1691,6 +1672,9 @@ async def run_async(input_data=None):
 
 def run(input_data=None):
     """Запустить async workflow из обычного синхронного кода."""
+    if sys.platform == "win32":
+        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+            return runner.run(run_async(input_data))
     return asyncio.run(run_async(input_data))
 
 

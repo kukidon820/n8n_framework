@@ -3,6 +3,8 @@
 Тесты проверяют сохранение исходного алгоритма и диагностику неподдерживаемого кода.
 """
 
+import asyncio
+
 import pytest
 
 from n8n_transcriper.converters.code import generate_code_node
@@ -19,7 +21,8 @@ def test_all_items_preserves_original_code():
     source = generate_code_node(make_node(code), "build")
     namespace = {}
     exec(source, namespace)
-    assert namespace["build"]([{"json": {"value": 1}}])[0]["json"]["count"] == 1
+    result = asyncio.run(namespace["build"]([{"json": {"value": 1}}]))
+    assert result[0]["json"]["count"] == 1
     assert "import json" in source
 
 
@@ -27,7 +30,7 @@ def test_each_item_executes_independently():
     node = make_node('return {"json": {"value": _item["json"]["value"] * 2}}', mode="runOnceForEachItem")
     namespace = {}
     exec(generate_code_node(node, "build"), namespace)
-    assert namespace["build"]([{"json": {"value": 2}}, {"json": {"value": 3}}]) == [
+    assert asyncio.run(namespace["build"]([{"json": {"value": 2}}, {"json": {"value": 3}}])) == [
         {"json": {"value": 4}}, {"json": {"value": 6}}]
 
 
