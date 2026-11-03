@@ -11,7 +11,6 @@ import tomllib
 import pytest
 
 from n8n_transcriper.generator import generate_project
-from n8n_transcriper.reader import WorkflowError
 
 
 def test_generate_project_can_return_files_without_writing_them(tmp_path):
