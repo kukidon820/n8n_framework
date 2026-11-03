@@ -93,17 +93,14 @@ def validate_workflow_issues(workflow: Any) -> list[str]:
 
             name = node.get("name")
             node_label = f"Узел «{name}»" if isinstance(name, str) and name else f"Узел №{index}"
-            node_is_valid = True
             for key, label in (("id", "id"), ("name", "имя"), ("type", "тип")):
                 value = node.get(key)
                 if not isinstance(value, str) or not value.strip():
                     issues.append(f"{node_label}: поле «{label}» должно быть непустой строкой.")
-                    node_is_valid = False
 
             if isinstance(name, str) and name:
                 if name in names:
                     issues.append(f"{node_label}: имя узла повторяется.")
-                    node_is_valid = False
                 else:
                     names.add(name)
 
@@ -111,13 +108,11 @@ def validate_workflow_issues(workflow: Any) -> list[str]:
             if isinstance(node_id, str) and node_id:
                 if node_id in ids:
                     issues.append(f"{node_label}: идентификатор узла повторяется.")
-                    node_is_valid = False
                 else:
                     ids.add(node_id)
 
             if not isinstance(node.get("parameters"), dict):
                 issues.append(f"{node_label}: поле «parameters» должно быть объектом.")
-                node_is_valid = False
 
     # Затем проверяем каждый путь соединения и указываем его точное место в JSON.
     if isinstance(connections, dict):

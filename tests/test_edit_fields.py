@@ -9,7 +9,6 @@ import pytest
 
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.generator import generate_project
-from n8n_transcriper.reader import WorkflowError
 from n8n_transcriper.versioning import compatible_node
 
 
