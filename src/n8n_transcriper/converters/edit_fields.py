@@ -25,7 +25,8 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
     p = node.get("parameters", {})
     if not function_name.isidentifier() or keyword.iskeyword(function_name):
         raise WorkflowError(f"Узел {name}: некорректное имя функции")
-    version = node.get("typeVersion")
+    source_version = node.get("_n8nOriginalTypeVersion", node.get("typeVersion"))
+    version = source_version
     if not isinstance(version, (int, float)) or isinstance(version, bool):
         version = 3.5
     elif version < 3.3:
@@ -34,14 +35,22 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
         version = 3.5
     if set(p) - {"mode", "assignments", "includeOtherFields", "include", "includeFields", "excludeFields", "options"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемые параметры Edit Fields")
-    if p.get("mode", "manual") != "manual" or p.get("include", "all") not in {"all", "selected", "except"}:
+    if p.get("mode", "manual") != "manual" or p.get("include", "all") not in {"all", "none", "selected", "except"}:
         raise WorkflowError(f"Узел {name}: неподдерживаемый режим Edit Fields")
     include = p.get("includeOtherFields", False)
     options = p.get("options", {})
-    if not isinstance(include, bool) or not isinstance(options, dict) or set(options) - {"stripBinary", "includeBinary", "dotNotation"}:
+    if not isinstance(include, bool) or not isinstance(options, dict) or set(options) - {
+        "stripBinary", "includeBinary", "dotNotation", "ignoreConversionErrors"
+    }:
         raise WorkflowError(f"Узел {name}: неподдерживаемые настройки Edit Fields")
-    # Выбор полей описывает исходный JSON; includeOtherFields решает, сохранять ли его.
-    selection = p.get("include", "all") if include else "none"
+    if source_version is not None and isinstance(source_version, (int, float)) and not isinstance(source_version, bool):
+        legacy_include = source_version < 3.3
+    else:
+        legacy_include = False
+    if legacy_include and "includeOtherFields" in p:
+        raise WorkflowError(f"Узел {name}: Include Other Input недоступен в этой версии Edit Fields")
+    # Старые версии управляли входными полями через include; новые используют отдельный переключатель.
+    selection = p.get("include", "all") if legacy_include else (p.get("include", "all") if include else "none")
     selection_field = "includeFields" if selection == "selected" else "excludeFields" if selection == "except" else None
     fields_text = p.get(selection_field, "") if selection_field else ""
     if not isinstance(fields_text, str) or "{{" in fields_text or any(c in fields_text for c in ".["):
@@ -58,9 +67,14 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
     for option, value in options.items():
         if not isinstance(value, bool):
             raise WorkflowError(f"Узел {name}: настройка {option} должна быть логической")
-    if version >= 3.4 and "includeBinary" in options or version < 3.4 and "stripBinary" in options:
+    if (version >= 3.4 and "includeBinary" in options) or (version < 3.4 and "stripBinary" in options):
         raise WorkflowError(f"Узел {name}: настройка binary не поддерживается этой версией")
-    keep_binary = include and not options.get("stripBinary", True) if version >= 3.4 else options.get("includeBinary", True)
+    keep_binary = (
+        include and selection != "none" and not options.get("stripBinary", True)
+        if version >= 3.4
+        else options.get("includeBinary", True)
+    )
+    ignore_conversion_errors = options.get("ignoreConversionErrors", False)
     assignments = p.get("assignments", {})
     if not isinstance(assignments, dict) or set(assignments) - {"assignments"} or not isinstance(assignments.get("assignments", []), list):
         raise WorkflowError(f"Узел {name}: некорректные assignments")
@@ -83,8 +97,11 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
             code = expression.code
         else:
             code = repr(value)
-        lines.extend([f"        value = convert_value({code}, {field_type!r})", f"        data[{field!r}] = value"])
-    helper = '''def convert_value(value, field_type):
+        lines.extend([
+            f"        value = convert_value({code}, {field_type!r}, ignore_errors={ignore_conversion_errors!r})",
+            f"        data[{field!r}] = value",
+        ])
+    helper = '''def convert_value(value, field_type, ignore_errors=False):
     """Привести значение поля к типу, выбранному в Edit Fields.
 
     JSON-объекты и массивы разбираются из строки при необходимости; несовместимые
@@ -92,42 +109,48 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
     """
     if value is None:
         return None
-    if field_type == "string":
-        if isinstance(value, (dict, list)):
-            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-        if isinstance(value, bool):
-            return "true" if value else "false"
-        if isinstance(value, (str, int)):
-            return str(value)
-        raise TypeError("Строковое значение не может быть корректно преобразовано")
-    if field_type == "boolean":
-        if isinstance(value, bool):
+    if field_type not in ("string", "boolean", "number", "object", "array"):
+        raise ValueError("Неизвестный тип поля")
+    try:
+        if field_type == "string":
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            if isinstance(value, bool):
+                return "true" if value else "false"
+            if isinstance(value, (str, int)):
+                return str(value)
+            raise TypeError("Строковое значение не может быть корректно преобразовано")
+        if field_type == "boolean":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.lower() in ("true", "false"):
+                return value.lower() == "true"
+            if isinstance(value, (int, float)) and value in (0, 1):
+                return bool(value)
+            if isinstance(value, str) and value.strip() in ("0", "1"):
+                return value.strip() == "1"
+            raise ValueError("Значение не может быть преобразовано в boolean")
+        if field_type == "number":
+            if isinstance(value, (int, float)):
+                return int(value) if isinstance(value, bool) else value
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return 0
+                if re.fullmatch(r"[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?", text):
+                    return float(text) if any(c in text for c in ".eE") else int(text)
+            raise ValueError("Значение не может быть преобразовано в number")
+        if field_type in ("object", "array"):
+            if isinstance(value, str):
+                value = json.loads(value)
+            expected = dict if field_type == "object" else list
+            if not isinstance(value, expected):
+                raise TypeError("Некорректный тип JSON-значения")
+            return deepcopy(value)
+    except (TypeError, ValueError):
+        if ignore_errors:
             return value
-        if isinstance(value, str) and value.lower() in ("true", "false"):
-            return value.lower() == "true"
-        if isinstance(value, (int, float)) and value in (0, 1):
-            return bool(value)
-        if isinstance(value, str) and value.strip() in ("0", "1"):
-            return value.strip() == "1"
-        raise ValueError("Значение не может быть преобразовано в boolean")
-    if field_type == "number":
-        if isinstance(value, (int, float)):
-            return int(value) if isinstance(value, bool) else value
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return 0
-            if re.fullmatch(r"[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?", text):
-                return float(text) if any(c in text for c in ".eE") else int(text)
-        raise ValueError("Значение не может быть преобразовано в number")
-    if field_type in ("object", "array"):
-        if isinstance(value, str):
-            value = json.loads(value)
-        expected = dict if field_type == "object" else list
-        if not isinstance(value, expected):
-            raise TypeError("Некорректный тип JSON-значения")
-        return deepcopy(value)
-    raise ValueError("Неизвестный тип поля")
+        raise
 '''
     source = ('import json\nimport re\nfrom copy import deepcopy\n\n\n' + helper + '\n\n' + f'def {function_name}(items, results, execution):\n' +
               '    """Применить Edit Fields к каждому входному item."""\n' +
