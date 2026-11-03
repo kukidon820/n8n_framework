@@ -431,7 +431,8 @@ def _generate_text_file(node: dict[str, Any], function_name: str, check: Any) ->
                     mime_type = "application/json"
                 content = _encode_text(str(value), __ENCODING__, __ADD_BOM__)
                 result.append({
-                    "json": {},
+                    # Convert to File adds binary data while keeping the source JSON fields.
+                    "json": dict(item.get("json", {})),
                     "binary": {__OUTPUT_FIELD__: _binary(content, __FILE_NAME__, mime_type)},
                 })
             return result
