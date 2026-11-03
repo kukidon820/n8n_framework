@@ -113,12 +113,13 @@ def test_generated_loop_batches_items_and_exposes_done_output(tmp_path, version)
     assert "Loop Items" in execution_order(standard_loop_workflow(version))
 
 
-def test_loop_requires_one_feedback_edge():
+def test_loop_without_feedback_is_reported_and_skipped():
     workflow = standard_loop_workflow()
     workflow["connections"]["Increment"]["main"] = [[]]
 
-    with pytest.raises(WorkflowError, match="обратная связь"):
-        generate_project(workflow)
+    files = generate_project(workflow)
+    assert "Loop Items" in files["main.py"]
+    assert "обратная связь" in files["main.py"]
 
 
 def test_generated_loop_reset_stops_when_body_returns_no_items(tmp_path):

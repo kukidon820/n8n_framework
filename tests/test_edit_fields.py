@@ -56,13 +56,16 @@ def test_includes_fields_and_binary_when_enabled():
     assert item["json"] == {"old": "yes"}
 
 
-def test_forward_reference_rejected_before_output(tmp_path):
+def test_forward_reference_is_reported_and_skipped(tmp_path):
     node = {"id": "a", "name": "Edit", "type": "n8n-nodes-base.set", "typeVersion": 3.5,
         "parameters": {"assignments": {"assignments": [{"name": "x", "type": "string",
             "value": "={{ $('Missing').first().json.x }}"}]}}}
-    with pytest.raises(WorkflowError, match="Missing"):
-        generate_project({"nodes": [node], "connections": {}}, tmp_path / "out")
-    assert not (tmp_path / "out").exists()
+    output = tmp_path / "out"
+    files = generate_project({"nodes": [node], "connections": {}}, output)
+    assert (output / "main.py").exists()
+    assert "Missing" in files["main.py"]
+    assert "Edit" in files["main.py"]
+    assert not (output / "operations" / "edit.py").exists()
 
 
 def test_typed_assignments_and_expressions():
