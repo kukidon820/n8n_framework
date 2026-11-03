@@ -3,6 +3,8 @@
 Проверяются вычисление assignments и сохранение исходных полей items.
 """
 
+import asyncio
+
 import pytest
 
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
@@ -31,13 +33,13 @@ def test_real_settings_and_edit_fields():
     ns = {}
     source, refs = generate_edit_fields(nodes["Settings"], "settings")
     exec(source, ns)
-    settings = ns["settings"]([{"json": {"ignored": "value"}}], {}, {})
+    settings = asyncio.run(ns["settings"]([{"json": {"ignored": "value"}}], {}, {}))
     assert "ignored" not in settings[0]["json"]
     source, refs = generate_edit_fields(nodes["Edit Fields"], "edit")
     assert refs == {"Settings", "ZIP - Save attachment base64"}
     exec(source, ns)
-    result = ns["edit"]([{"json": {"output": "готово"}}], {
-        "Settings": settings, "ZIP - Save attachment base64": [{"json": {"zip_base64": "YWJj"}}]}, {})
+    result = asyncio.run(ns["edit"]([{"json": {"output": "готово"}}], {
+        "Settings": settings, "ZIP - Save attachment base64": [{"json": {"zip_base64": "YWJj"}}]}, {}))
     assert result[0]["json"]["report_text"] == "готово"
     assert result[0]["json"]["zip_base64"] == "YWJj"
     assert result[0]["json"]["mail_to"] == settings[0]["json"]["mail_to"]
@@ -51,7 +53,7 @@ def test_includes_fields_and_binary_when_enabled():
     ns = {}
     exec(source, ns)
     item = {"json": {"old": "yes"}, "binary": {"data": {"data": b"a"}}}
-    result = ns["run"]([item], {}, {})
+    result = asyncio.run(ns["run"]([item], {}, {}))
     assert result == [{"json": {"old": "yes", "new": "hello"}, "binary": item["binary"]}]
     assert item["json"] == {"old": "yes"}
 
@@ -81,7 +83,7 @@ def test_typed_assignments_and_expressions():
     source, _ = generate_edit_fields(node, "run")
     namespace = {}
     exec(source, namespace)
-    result = namespace["run"]([{"json": {"count": "12.5", "data": {"ok": True}}}], {}, {})
+    result = asyncio.run(namespace["run"]([{"json": {"count": "12.5", "data": {"ok": True}}}], {}, {}))
     assert result == [{"json": {"count": 12.5, "enabled": False, "object": {"a": 1},
                                 "array": [1, 2], "text": '{"ok":true}', "empty": None}}]
 
@@ -93,7 +95,7 @@ def test_invalid_boolean_does_not_become_true():
     namespace = {}
     exec(source, namespace)
     with pytest.raises(ValueError, match="boolean"):
-        namespace["run"]([{"json": {}}], {}, {})
+        asyncio.run(namespace["run"]([{"json": {}}], {}, {}))
 
 
 def test_ignore_type_conversion_errors_keeps_original_value():
@@ -109,7 +111,7 @@ def test_ignore_type_conversion_errors_keeps_original_value():
     exec(source, namespace)
 
     item = {"json": {"count": "many", "details": "not-json"}}
-    assert namespace["run"]([item], {}, {}) == [{"json": item["json"]}]
+    assert asyncio.run(namespace["run"]([item], {}, {})) == [{"json": item["json"]}]
 
 
 def test_conversion_errors_are_not_ignored_by_default():
@@ -123,7 +125,7 @@ def test_conversion_errors_are_not_ignored_by_default():
     exec(source, namespace)
 
     with pytest.raises(ValueError, match="number"):
-        namespace["run"]([{"json": {"count": "many"}}], {}, {})
+        asyncio.run(namespace["run"]([{"json": {"count": "many"}}], {}, {}))
 
 
 @pytest.mark.parametrize("mode,field,expected", [
@@ -136,7 +138,7 @@ def test_select_or_exclude_input_fields(mode, field, expected):
     source, _ = generate_edit_fields(node, "run")
     namespace = {}
     exec(source, namespace)
-    assert namespace["run"]([{"json": {"keep": 1, "drop": 2}}], {}, {}) == [{"json": expected}]
+    assert asyncio.run(namespace["run"]([{"json": {"keep": 1, "drop": 2}}], {}, {})) == [{"json": expected}]
 
 
 def test_include_other_input_and_strip_binary_data():
@@ -152,7 +154,7 @@ def test_include_other_input_and_strip_binary_data():
     exec(source, namespace)
     item = {"json": {"original": True}, "binary": {"data": {"data": b"file"}}}
 
-    assert namespace["run"]([item], {}, {}) == [{"json": {"original": True, "added": "yes"}}]
+    assert asyncio.run(namespace["run"]([item], {}, {})) == [{"json": {"original": True, "added": "yes"}}]
 
 
 @pytest.mark.parametrize("include,expected", [
@@ -170,7 +172,7 @@ def test_legacy_include_mode_is_respected(include, expected):
     namespace = {}
     exec(source, namespace)
     item = {"json": {"original": True}, "binary": {"data": {"data": b"file"}}}
-    result = namespace["run"]([item], {}, {})
+    result = asyncio.run(namespace["run"]([item], {}, {}))
 
     assert result[0]["json"] == expected
     assert result[0]["binary"] == item["binary"]

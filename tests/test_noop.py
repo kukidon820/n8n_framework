@@ -1,5 +1,6 @@
 """Проверки конвертации и выполнения узла No Operation."""
 
+import asyncio
 import subprocess
 import sys
 
@@ -19,7 +20,7 @@ def test_noop_converter_passes_through_items_unchanged():
     exec(source, namespace)
     items = [{"json": {"answer": 42}, "binary": {"file": {"data": b"bytes"}}}]
 
-    result = namespace["do_nothing"](items)
+    result = asyncio.run(namespace["do_nothing"](items))
 
     assert result is items
     assert result[0] == items[0]

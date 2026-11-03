@@ -122,7 +122,7 @@ LOOP_MODULE = '''"""Runtime-класс для пакетной обработк�
 пакет, а collect принимает данные обратной связи от последнего узла тела цикла.
 """
 
-import time
+import asyncio
 from copy import deepcopy
 
 
@@ -199,8 +199,8 @@ class Loop:
         self._feedback = None
         self._linked_item_index = 0
 
-    def _retry(self, action):
-        """Повторить внутренний шаг Loop по настройкам Retry On Fail."""
+    async def _retry(self, action):
+        """Повторить внутренний шаг Loop без блокировки event loop."""
         attempts = self.max_tries if self.retry_on_fail else 1
         for attempt in range(attempts):
             try:
@@ -209,10 +209,10 @@ class Loop:
                 if attempt + 1 >= attempts:
                     raise
                 if self.wait_between_tries:
-                    time.sleep(self.wait_between_tries / 1000)
+                    await asyncio.sleep(self.wait_between_tries / 1000)
 
-    def iterate(self, items):
-        """Последовательно выдавать пакеты, ожидая collect после каждого.
+    async def iterate(self, items):
+        """Асинхронно выдавать пакеты, ожидая collect после каждого.
 
         При обычном режиме пакет выбирается по смещению во входном списке, а
         выход тела цикла добавляется в ``done_items``. При reset=True новый
@@ -222,7 +222,7 @@ class Loop:
         source_items = list(items)
         if self.execute_once:
             source_items = source_items[:1]
-        current_items = self._retry(lambda: deepcopy(source_items))
+        current_items = await self._retry(lambda: deepcopy(source_items))
         self.done_items = []
         self.completed = not current_items
         self.results = {}
@@ -234,7 +234,7 @@ class Loop:
         # Reset трактует каждый вернувшийся набор как новое входное множество.
         if self.reset:
             while current_items:
-                batch = self._retry(lambda: deepcopy(current_items[:self.batch_size]))
+                batch = await self._retry(lambda: deepcopy(current_items[:self.batch_size]))
                 self.done_items = []
                 self._feedback = None
                 yield batch
@@ -243,7 +243,7 @@ class Loop:
                 if not self._feedback:
                     self.completed = True
                     return
-                current_items = self._retry(lambda: deepcopy(self._feedback))
+                current_items = await self._retry(lambda: deepcopy(self._feedback))
             self.completed = True
             return
 
@@ -251,21 +251,21 @@ class Loop:
         # оставшуюся часть исходного набора: следующий пакет выбирается по offset.
         offset = 0
         while offset < len(current_items):
-            batch = self._retry(lambda: deepcopy(current_items[offset:offset + self.batch_size]))
+            batch = await self._retry(lambda: deepcopy(current_items[offset:offset + self.batch_size]))
             self._feedback = None
             yield batch
             if self._feedback is None:
                 raise RuntimeError("Loop.collect() не вызван после обработки пакета")
-            self.done_items.extend(deepcopy(self._feedback))
+            self.done_items.extend(await self._retry(lambda: deepcopy(self._feedback)))
             offset += self.batch_size
         self.completed = True
 
-    def collect(self, items):
-        """Передать выход обратной связи после выполнения текущего пакета."""
+    async def collect(self, items):
+        """Асинхронно сохранить выход обратной связи текущего пакета."""
         source_items = list(items)
         if self.execute_once:
             source_items = source_items[:1]
-        self._feedback = self._retry(lambda: deepcopy(source_items))
+        self._feedback = await self._retry(lambda: deepcopy(source_items))
 
     def record_result(self, node_name, items):
         """Добавить выход узла тела цикла к результатам прошлых итераций.

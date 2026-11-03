@@ -13,20 +13,21 @@ from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 
 
-POSTGRES_MODULE = '''"""Общие настройки подключения к PostgreSQL generated-проекта."""
+POSTGRES_MODULE = '''"""Асинхронные настройки подключения к PostgreSQL generated-проекта."""
 
-import psycopg
+from psycopg import AsyncConnection
 from psycopg.rows import dict_row
 import config
 
 
-def connect(timeout):
-    """Открыть соединение psycopg с credentials из config.py.
+async def connect(timeout):
+    """Открыть async-соединение psycopg с credentials из config.py.
 
     Словарный row_factory возвращает результаты в форме, удобной для JSON items.
-    Владелец соединения отвечает за его закрытие и commit/rollback.
+    AsyncConnection context manager закрывает соединение и фиксирует или
+    откатывает транзакцию в зависимости от результата блока.
     """
-    return psycopg.connect(
+    return await AsyncConnection.connect(
         host=config.POSTGRES_HOST, port=config.POSTGRES_PORT,
         dbname=config.POSTGRES_DATABASE, user=config.POSTGRES_USER,
         password=config.POSTGRES_PASSWORD, connect_timeout=timeout, row_factory=dict_row,
@@ -96,24 +97,24 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
     parameter_code = textwrap.indent(parameter_code, "    ") if parameter_code else ""
     # В transaction все items используют одно соединение и общую транзакцию.
     if options["queryBatching"] == "transaction":
-        run_body = f'''    with connect({timeout!r}) as conn:
+        run_body = f'''    async with await connect({timeout!r}) as conn:
         for item in items:
-            output.extend(execute_one(conn, item, items, results, execution))
+            output.extend(await execute_one(conn, item, items, results, execution))
 '''
     else:
         run_body = f'''    for item in items:
-        with connect({timeout!r}) as conn:
-            output.extend(execute_one(conn, item, items, results, execution))
+        async with await connect({timeout!r}) as conn:
+            output.extend(await execute_one(conn, item, items, results, execution))
 '''
     source = f'''import json
 from database.postgres import connect
 
 
-def execute_one(conn, item, items, results, execution):
+async def execute_one(conn, item, items, results, execution):
     """Подготовить SQL-параметры, выполнить один запрос и обернуть строки в items."""
-{parameter_code}    with conn.cursor() as cursor:
-        cursor.execute({query!r}, {arguments})
-        rows = cursor.fetchall() if cursor.description is not None else []
+{parameter_code}    async with conn.cursor() as cursor:
+        await cursor.execute({query!r}, {arguments})
+        rows = await cursor.fetchall() if cursor.description is not None else []
         # Decimal и большие целые превращаются в строки для устойчивой JSON-сериализации.
         for row in rows:
             for column in cursor.description:
@@ -124,7 +125,7 @@ def execute_one(conn, item, items, results, execution):
         return [{{"json": row}} for row in rows]
 
 
-def {function_name}(items, results, execution):
+async def {function_name}(items, results, execution):
     """Выполнить запрос для входных items с заданным режимом batching."""
     output = []
 {run_body}    return output

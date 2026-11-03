@@ -3,6 +3,7 @@
 Проверяются MIME-сообщения, адресаты и вложения без отправки реальных писем.
 """
 
+import asyncio
 import base64
 import sys
 from email.message import EmailMessage
@@ -113,6 +114,12 @@ def test_email_send_translates_expressions_and_sends_attachments(monkeypatch):
     class SMTPRecipientsRefused(Exception):
         pass
 
+    async def send(message, **kwargs):
+        sent.append(((kwargs["hostname"], kwargs["port"], kwargs["timeout"], kwargs["tls_context"]),
+                     (kwargs["username"], kwargs["password"]), message,
+                     kwargs["sender"], kwargs["recipients"]))
+        return {}, None
+
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(
         SMTP_HOST="smtp.example.com",
         SMTP_PORT=587,
@@ -122,14 +129,13 @@ def test_email_send_translates_expressions_and_sends_attachments(monkeypatch):
         SMTP_USE_SSL=False,
         SMTP_STARTTLS=True,
     ))
-    monkeypatch.setitem(sys.modules, "smtplib", SimpleNamespace(
-        SMTP=FakeSMTP,
-        SMTP_SSL=FakeSMTP,
+    monkeypatch.setitem(sys.modules, "aiosmtplib", SimpleNamespace(
+        send=send,
         SMTPRecipientsRefused=SMTPRecipientsRefused,
     ))
     namespace = {}
     exec(source, namespace)
-    result = namespace["send_email"](
+    result = asyncio.run(namespace["send_email"](
         [{
             "json": {"body": "Report is ready"},
             "binary": {
@@ -142,7 +148,7 @@ def test_email_send_translates_expressions_and_sends_attachments(monkeypatch):
         }],
         {"Settings": [{"json": {"recipient": "reader@example.com"}}]},
         {},
-    )
+    ))
 
     assert result == [{"json": {"accepted": [
         "reader@example.com", "copy@example.com", "hidden@example.com",
@@ -159,6 +165,34 @@ def test_email_send_translates_expressions_and_sends_attachments(monkeypatch):
     assert message["Reply-To"] == "reply@example.com"
     assert "This email was sent automatically with n8n" in message.get_body(preferencelist=("plain",)).get_content()
     assert any(part.get_filename() == "report.zip" and part.get_content() == b"zip bytes" for part in message.walk())
+
+
+def test_email_send_reports_partially_refused_recipients(monkeypatch):
+    node = email_send_node()
+    node["parameters"]["options"].pop("fileAttachments")
+    source, _ = generate_email_send_node(node, "send_email")
+
+    async def send(message, **kwargs):
+        return {"blocked@example.com": (550, "Mailbox unavailable")}, "accepted"
+
+    monkeypatch.setitem(sys.modules, "config", SimpleNamespace(
+        SMTP_HOST="smtp.example.com",
+        SMTP_PORT=587,
+        SMTP_USERNAME="sender@example.com",
+        SMTP_APP_PASSWORD="app-password",
+        SMTP_HOSTNAME="",
+        SMTP_USE_SSL=False,
+        SMTP_STARTTLS=True,
+    ))
+    monkeypatch.setitem(sys.modules, "aiosmtplib", SimpleNamespace(
+        send=send,
+        SMTPRecipientsRefused=Exception,
+    ))
+    namespace = {}
+    exec(source, namespace)
+
+    with pytest.raises(RuntimeError, match="blocked@example.com"):
+        asyncio.run(namespace["send_email"]([{"json": {}}], {}, {}))
 
 
 def test_email_send_rejects_unknown_options_and_missing_credentials():
@@ -243,23 +277,29 @@ def test_gmail_send_endpoint_generates_smtp_config_and_sender(tmp_path, monkeypa
     class SMTPRecipientsRefused(Exception):
         pass
 
+    async def send(message, **kwargs):
+        sent.append(((kwargs["hostname"], kwargs["port"], kwargs["timeout"], kwargs["tls_context"]),
+                     (kwargs["username"], kwargs["password"]), message,
+                     kwargs["sender"], kwargs["recipients"]))
+        return {}, None
+
     monkeypatch.setitem(sys.modules, "config", SimpleNamespace(
         SMTP_USERNAME="sender@gmail.com",
         SMTP_APP_PASSWORD="abcd efgh ijkl mnop",
         SMTP_FROM="",
         SMTP_HOST="smtp.gmail.com",
+        SMTP_HOSTNAME="",
         SMTP_PORT=587,
         SMTP_USE_SSL=False,
         SMTP_STARTTLS=True,
     ))
-    monkeypatch.setitem(sys.modules, "smtplib", SimpleNamespace(
-        SMTP=FakeSMTP,
-        SMTP_SSL=FakeSMTP,
+    monkeypatch.setitem(sys.modules, "aiosmtplib", SimpleNamespace(
+        send=send,
         SMTPRecipientsRefused=SMTPRecipientsRefused,
     ))
     namespace = {}
     exec(source, namespace)
-    result = namespace["send_email"]([{"json": {"raw": raw}}], {}, {})
+    result = asyncio.run(namespace["send_email"]([{"json": {"raw": raw}}], {}, {}))
 
     assert result == [{"json": {"accepted": ["recipient@example.com"]}}]
     connection, credentials, message, from_addr, recipients = sent[0]
@@ -288,7 +328,14 @@ def test_smtp_sender_rejects_unencrypted_app_password(monkeypatch):
         SMTP_USE_SSL=False,
         SMTP_STARTTLS=False,
     ))
+    async def unused_send(*args, **kwargs):
+        raise AssertionError("SMTP validation must fail before sending")
+
+    monkeypatch.setitem(sys.modules, "aiosmtplib", SimpleNamespace(
+        send=unused_send,
+        SMTPRecipientsRefused=Exception,
+    ))
     namespace = {}
     exec(source, namespace)
     with pytest.raises(ValueError, match="SMTP требует шифрование"):
-        namespace["send_email"]([{"json": {"raw": "unused"}}], {}, {})
+        asyncio.run(namespace["send_email"]([{"json": {"raw": "unused"}}], {}, {}))

@@ -32,7 +32,7 @@ def generate_merge_node(node: dict[str, Any], function_name: str) -> tuple[str, 
     if mode == "append":
         if set(p) - {"mode", "numberInputs", "options"} or p.get("options", {}):
             raise WorkflowError(f"Узел {name}: неподдерживаемые настройки Merge Append")
-        return f'''def {function_name}(inputs):
+        return f'''async def {function_name}(inputs):
     """Добавить items всех входов подряд, сохраняя порядок портов."""
     result = []
     for input_index, items in enumerate(inputs):
@@ -291,7 +291,7 @@ def combine(entries):
     return result
 
 
-def {function_name}(inputs):
+async def {function_name}(inputs):
     """Сопоставить items и вернуть пары, unmatched-элементы или все сочетания."""
     output = []
 {pairs}    return output

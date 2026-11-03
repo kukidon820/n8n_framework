@@ -3,6 +3,7 @@
 Проверяются объединение items и сопоставление полей между входами.
 """
 
+import asyncio
 import subprocess
 import sys
 
@@ -59,7 +60,10 @@ def make_combine(combine_by, options=None, **params):
     namespace = {}
     exec(source, namespace)
     assert count == 2
-    return namespace["run"]
+    async def run_async(inputs):
+        return await namespace["run"](inputs)
+
+    return run_async
 
 
 def test_combine_by_position_deep_merge_and_unpaired():
@@ -67,7 +71,7 @@ def test_combine_by_position_deep_merge_and_unpaired():
     first = [{"json": {"id": 1, "nested": {"a": 1}, "list": [1, 2]}, "binary": {"file": {"data": b"x"}}},
              {"json": {"id": 2}}]
     second = [{"json": {"nested": {"b": 2}, "list": [9]}}]
-    result = run([first, second])
+    result = asyncio.run(run([first, second]))
     assert result[0]["json"] == {"id": 1, "nested": {"a": 1, "b": 2}, "list": [9, 2]}
     assert result[0]["binary"]["file"]["data"] == b"x"
     assert result[1]["json"] == {"id": 2}
@@ -77,17 +81,17 @@ def test_combine_all_conflicts_and_suffixed_fields():
     first = [{"json": {"value": "a"}}, {"json": {"value": "b"}}]
     second = [{"json": {"value": "c"}}, {"json": {"value": "d"}}]
     run = make_combine("combineAll", {"clashHandling": {"values": {"resolveClash": "addSuffix"}}})
-    result = run([first, second])
+    result = asyncio.run(run([first, second]))
     assert len(result) == 4
     assert result[0]["json"] == {"value_1": "a", "value_2": "c"}
 
 
 def test_combine_by_fields_matches_types_and_duplicates():
     run = make_combine("combineByFields", fieldsToMatchString="id")
-    result = run([[{"json": {"id": 1, "left": 1}}, {"json": {"id": "1"}}],
-                  [{"json": {"id": 1, "right": "a"}}, {"json": {"id": 1, "right": "b"}}]])
+    result = asyncio.run(run([[{"json": {"id": 1, "left": 1}}, {"json": {"id": "1"}}],
+                  [{"json": {"id": 1, "right": "a"}}, {"json": {"id": 1, "right": "b"}}]]))
     assert [entry["json"]["right"] for entry in result] == ["a", "b"]
-    result = run([[{"json": {"id": 1.0}}, {"json": {"id": True}}], [{"json": {"id": 1}}]])
+    result = asyncio.run(run([[{"json": {"id": 1.0}}, {"json": {"id": True}}], [{"json": {"id": 1}}]]))
     assert len(result) == 1
 
 
@@ -122,7 +126,7 @@ def test_combine_join_modes(mode, expected):
     run = make_combine("combineByFields", fieldsToMatchString="id", joinMode=mode)
     first = [{"json": {"id": 1, "left": True}}, {"json": {"id": 2, "left": True}}]
     second = [{"json": {"id": 1, "right": True}}, {"json": {"id": 3, "right": True}}]
-    result = run([first, second])
+    result = asyncio.run(run([first, second]))
     actual = [(entry["json"]["id"], "both" if "left" in entry["json"] and "right" in entry["json"] else "left" if "left" in entry["json"] else "right") for entry in result]
     assert actual == expected
     if mode == "keepNonMatches":
@@ -131,10 +135,10 @@ def test_combine_join_modes(mode, expected):
 
 def test_combine_by_nested_or_literal_dot_fields():
     nested = make_combine("combineByFields", fieldsToMatchString="person.id")
-    assert len(nested([[{"json": {"person": {"id": 4}}}], [{"json": {"person": {"id": 4}}}]])) == 1
+    assert len(asyncio.run(nested([[{"json": {"person": {"id": 4}}}], [{"json": {"person": {"id": 4}}}]]))) == 1
     literal = make_combine("combineByFields", {"disableDotNotation": True}, fieldsToMatchString="person.id")
-    assert len(literal([[{"json": {"person.id": 4}}], [{"json": {"person.id": 4}}]])) == 1
-    assert literal([[{"json": {"person": {"id": 4}}}], [{"json": {"person": {"id": 4}}}]]) == []
+    assert len(asyncio.run(literal([[{"json": {"person.id": 4}}], [{"json": {"person.id": 4}}]]))) == 1
+    assert asyncio.run(literal([[{"json": {"person": {"id": 4}}}], [{"json": {"person": {"id": 4}}}]])) == []
 
 
 @pytest.mark.parametrize(
@@ -144,11 +148,11 @@ def test_combine_by_nested_or_literal_dot_fields():
 )
 def test_combine_fuzzy_comparison(left, right):
     run = make_combine("combineByFields", {"fuzzyCompare": True}, fieldsToMatchString="id")
-    assert len(run([[{"json": {"id": left}}], [{"json": {"id": right}}]])) == 1
+    assert len(asyncio.run(run([[{"json": {"id": left}}], [{"json": {"id": right}}]]))) == 1
 
 
 def test_combine_fuzzy_comparison_matches_missing_empty_fields():
     run = make_combine("combineByFields", {"fuzzyCompare": True}, fieldsToMatchString="id")
-    assert len(run([[{"json": {}}], [{"json": {"id": None}}]])) == 1
-    assert len(run([[{"json": {"id": ""}}], [{"json": {}}]])) == 1
-    assert len(run([[{"json": {}}], [{"json": {"id": "present"}}]])) == 0
+    assert len(asyncio.run(run([[{"json": {}}], [{"json": {"id": None}}]]))) == 1
+    assert len(asyncio.run(run([[{"json": {"id": ""}}], [{"json": {}}]]))) == 1
+    assert len(asyncio.run(run([[{"json": {}}], [{"json": {"id": "present"}}]]))) == 0

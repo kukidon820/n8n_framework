@@ -108,7 +108,7 @@ def test_generated_loop_batches_items_and_exposes_done_output(tmp_path, version)
     assert result.stdout.strip() == "[1, 2, 3, 4, 5]"
     source = (output / "main.py").read_text(encoding="utf-8")
     assert "loop_loop_items = Loop(batch_size=2, reset=False)" in source
-    assert "for loop_batch in loop_loop_items.iterate(items):" in source
+    assert "async for loop_batch in loop_loop_items.iterate(items):" in source
     assert (output / "operations" / "loop.py").read_text(encoding="utf-8") == LOOP_MODULE
     assert "Loop Items" in execution_order(standard_loop_workflow(version))
 

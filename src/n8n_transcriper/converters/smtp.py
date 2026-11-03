@@ -51,7 +51,7 @@ def generate_smtp_node(node: dict[str, Any], function_name: str) -> tuple[str, s
     timeout = timeout_ms / 1000
     source = f'''import base64
 import json
-import smtplib
+import aiosmtplib
 import ssl
 from email.parser import BytesParser
 from email.policy import SMTP
@@ -60,15 +60,15 @@ from email.utils import getaddresses
 import config
 
 
-def {function_name}(items, results, execution):
+async def {function_name}(items, results, execution):
     """Разобрать Gmail raw MIME и отправить каждое письмо через SMTP.
 
     Gmail raw декодируется из base64url, заголовок To становится списком
     получателей, а транспорт шифруется SSL либо STARTTLS по config.py.
     """
     # Секреты не встраиваются в модуль; SMTP требует включённого TLS-режима.
-    if not config.SMTP_USERNAME or not config.SMTP_APP_PASSWORD:
-        raise ValueError("Задайте SMTP_USERNAME и SMTP_APP_PASSWORD в config.py или окружении")
+    if not config.SMTP_HOST or not config.SMTP_USERNAME or not config.SMTP_APP_PASSWORD:
+        raise ValueError("Задайте SMTP_HOST, SMTP_USERNAME и SMTP_APP_PASSWORD в config.py или окружении")
     if config.SMTP_USE_SSL and config.SMTP_STARTTLS:
         raise ValueError("Выберите SMTP_USE_SSL или SMTP_STARTTLS, но не оба режима")
     if not config.SMTP_USE_SSL and not config.SMTP_STARTTLS:
@@ -96,21 +96,22 @@ def {function_name}(items, results, execution):
         if "From" not in message:
             message["From"] = sender
         password = config.SMTP_APP_PASSWORD.replace(" ", "")
-        if config.SMTP_USE_SSL:
-            server = smtplib.SMTP_SSL(
-                config.SMTP_HOST, config.SMTP_PORT, timeout={timeout!r},
-                context=ssl.create_default_context(),
-            )
-        else:
-            server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout={timeout!r})
-        with server as client:
-            if config.SMTP_STARTTLS:
-                client.starttls(context=ssl.create_default_context())
-                client.ehlo()
-            client.login(config.SMTP_USERNAME, password)
-            refused = client.send_message(message, from_addr=sender, to_addrs=recipients)
-            if refused:
-                raise smtplib.SMTPRecipientsRefused(refused)
+        refused, _ = await aiosmtplib.send(
+            message,
+            sender=sender,
+            recipients=recipients,
+            hostname=config.SMTP_HOST,
+            port=config.SMTP_PORT,
+            timeout={timeout!r},
+            username=config.SMTP_USERNAME,
+            password=password,
+            use_tls=config.SMTP_USE_SSL,
+            start_tls=config.SMTP_STARTTLS and not config.SMTP_USE_SSL,
+            local_hostname=config.SMTP_HOSTNAME or None,
+            tls_context=ssl.create_default_context(),
+        )
+        if refused:
+            raise RuntimeError("SMTP сервер отклонил получателей: " + ", ".join(refused))
         sent.append({{"json": {{"accepted": recipients}}}})
     return sent
 '''
@@ -205,7 +206,7 @@ def generate_email_send_node(node: dict[str, Any], function_name: str) -> tuple[
     # Ниже создаётся обычный модуль: вспомогательные функции разбирают адреса и binary.
     source = f'''import base64
 import json
-import smtplib
+import aiosmtplib
 import ssl
 from email.message import EmailMessage
 from email.utils import getaddresses
@@ -250,7 +251,7 @@ def _binary_content(item, property_name):
     raise ValueError(f"Binary-параметр {{property_name!r}} не содержит данных base64 или bytes")
 
 
-def {function_name}(items, results, execution):
+async def {function_name}(items, results, execution):
     """Собрать EmailMessage для каждого item и отправить его через SMTP.
 
     To/Cc/Bcc объединяются для транспорта; текст, HTML и вложения добавляются
@@ -348,32 +349,23 @@ def {function_name}(items, results, execution):
             raise ValueError("В Email Send не указан корректный адрес отправителя")
 
         password = config.SMTP_APP_PASSWORD.replace(" ", "")
-        if config.SMTP_USE_SSL:
-            server = smtplib.SMTP_SSL(
-                config.SMTP_HOST,
-                config.SMTP_PORT,
-                timeout=60,
-                context=tls_context,
-            )
-        else:
-            server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=60)
-        with server as client:
-            if config.SMTP_HOSTNAME:
-                client.ehlo(config.SMTP_HOSTNAME)
-            if config.SMTP_STARTTLS:
-                client.starttls(context=tls_context)
-                if config.SMTP_HOSTNAME:
-                    client.ehlo(config.SMTP_HOSTNAME)
-                else:
-                    client.ehlo()
-            client.login(config.SMTP_USERNAME, password)
-            refused = client.send_message(
-                message,
-                from_addr=sender_addresses[0],
-                to_addrs=recipients,
-            )
-            if refused:
-                raise smtplib.SMTPRecipientsRefused(refused)
+        refused, _ = await aiosmtplib.send(
+            message,
+            sender=sender_addresses[0],
+            recipients=recipients,
+            hostname=config.SMTP_HOST,
+            port=config.SMTP_PORT,
+            timeout=60,
+            username=config.SMTP_USERNAME,
+            password=password,
+            use_tls=config.SMTP_USE_SSL,
+            start_tls=config.SMTP_STARTTLS and not config.SMTP_USE_SSL,
+            local_hostname=config.SMTP_HOSTNAME or None,
+            validate_certs=not {allow_unauthorized_certs!r},
+            tls_context=tls_context,
+        )
+        if refused:
+            raise RuntimeError("SMTP сервер отклонил получателей: " + ", ".join(refused))
         sent.append({{"json": {{"accepted": recipients}}}})
     return sent
 '''
