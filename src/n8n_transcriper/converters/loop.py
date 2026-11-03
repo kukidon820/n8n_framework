@@ -1,6 +1,7 @@
 """Настройки n8n Loop Over Items и код его лёгкого generated-runtime.
 
-Конвертер определяет выходы по версии узла и проверяет batchSize/reset. Строка
+Конвертер определяет выходы по версии узла и проверяет batchSize, reset и
+общие настройки узла. Строка
 ``LOOP_MODULE`` записывается только в generated-проект, если workflow содержит
 цикл; обычные workflow не получают дополнительный runtime-файл.
 """
@@ -22,6 +23,10 @@ class LoopSettings:
     version: int
     batch_size: int
     reset: bool
+    execute_once: bool
+    retry_on_fail: bool
+    max_tries: int
+    wait_between_tries: int | float
     loop_output: int
     done_output: int | None
     output_count: int
@@ -55,8 +60,8 @@ def generate_loop_node(node: dict[str, Any]) -> LoopSettings:
     """Проверить поддерживаемые параметры узла и вернуть LoopSettings.
 
     Если размер пакета не задан, используются значения по умолчанию n8n для
-    основной версии. Выражения для ``reset`` не преобразуются: настройка должна
-    быть фиксированным bool, чтобы поведение generated-класса было явным.
+    основной версии. reset и executeOnce принимают только фиксированные bool.
+    retryOnFail повторяет внутреннюю обработку Loop, но не шаги его тела.
     """
     name = node.get("name", "<без имени>")
     parameters = node.get("parameters", {})
@@ -79,7 +84,36 @@ def generate_loop_node(node: dict[str, Any]) -> LoopSettings:
     if not isinstance(reset, bool):
         raise WorkflowError(f"Узел {name}: options.reset должен быть фиксированным логическим значением")
 
-    return LoopSettings(version, batch_size, reset, loop_output, done_output, output_count)
+    execute_once = node.get("executeOnce", False)
+    if not isinstance(execute_once, bool):
+        raise WorkflowError(f"Узел {name}: executeOnce должен быть логическим значением")
+
+    retry_on_fail = node.get("retryOnFail", False)
+    if not isinstance(retry_on_fail, bool):
+        raise WorkflowError(f"Узел {name}: retryOnFail должен быть логическим значением")
+    max_tries = node.get("maxTries", 3) if retry_on_fail else 1
+    wait_between_tries = node.get("waitBetweenTries", 1000) if retry_on_fail else 0
+    if not isinstance(max_tries, int) or isinstance(max_tries, bool) or max_tries < 1:
+        raise WorkflowError(f"Узел {name}: maxTries должен быть целым числом не меньше 1")
+    if (
+        not isinstance(wait_between_tries, (int, float))
+        or isinstance(wait_between_tries, bool)
+        or wait_between_tries < 0
+    ):
+        raise WorkflowError(f"Узел {name}: waitBetweenTries должен быть числом не меньше 0")
+
+    return LoopSettings(
+        version,
+        batch_size,
+        reset,
+        execute_once,
+        retry_on_fail,
+        max_tries,
+        wait_between_tries,
+        loop_output,
+        done_output,
+        output_count,
+    )
 
 
 LOOP_MODULE = '''"""Runtime-класс для пакетной обработки items в Loop Over Items.
@@ -88,6 +122,7 @@ LOOP_MODULE = '''"""Runtime-класс для пакетной обработк�
 пакет, а collect принимает данные обратной связи от последнего узла тела цикла.
 """
 
+import time
 from copy import deepcopy
 
 
@@ -98,12 +133,25 @@ class Loop:
         batch_size: Максимум входных items в одном вызове тела цикла.
         reset: Если True, считать данные обратной связи новым набором для обработки;
             пустая обратная связь завершает итерации.
+        execute_once: Передавать циклу только первый item при каждом входе.
+        retry_on_fail: Повторять ошибки подготовки входа, пакета и обратной связи.
+        max_tries: Максимум попыток при включённом retry_on_fail.
+        wait_between_tries: Пауза между попытками в миллисекундах.
 
     ``done_items`` содержит обработанные items для Done-выхода. ``results`` хранит
     накопленные выходы именованных узлов, нужные expressions внутри цикла.
     """
 
-    def __init__(self, batch_size=1, reset=False, n8n_manual_parameters=None):
+    def __init__(
+        self,
+        batch_size=1,
+        reset=False,
+        execute_once=False,
+        retry_on_fail=False,
+        max_tries=3,
+        wait_between_tries=1000,
+        n8n_manual_parameters=None,
+    ):
         """Сохранить настройки и подготовить пустое состояние текущего запуска.
 
         ``n8n_manual_parameters`` содержит шаблон настроек узла, версия которого
@@ -114,6 +162,18 @@ class Loop:
             raise ValueError("batch_size должен быть целым числом не меньше 1")
         if not isinstance(reset, bool):
             raise TypeError("reset должен быть логическим значением")
+        if not isinstance(execute_once, bool):
+            raise TypeError("execute_once должен быть логическим значением")
+        if not isinstance(retry_on_fail, bool):
+            raise TypeError("retry_on_fail должен быть логическим значением")
+        if not isinstance(max_tries, int) or isinstance(max_tries, bool) or max_tries < 1:
+            raise ValueError("max_tries должен быть целым числом не меньше 1")
+        if (
+            not isinstance(wait_between_tries, (int, float))
+            or isinstance(wait_between_tries, bool)
+            or wait_between_tries < 0
+        ):
+            raise ValueError("wait_between_tries должен быть числом не меньше 0")
         unsupported_paths = (
             n8n_manual_parameters.get("unsupported_parameter_paths", ())
             if isinstance(n8n_manual_parameters, dict)
@@ -126,6 +186,10 @@ class Loop:
             )
         self.batch_size = batch_size
         self.reset = reset
+        self.execute_once = execute_once
+        self.retry_on_fail = retry_on_fail
+        self.max_tries = max_tries
+        self.wait_between_tries = wait_between_tries
         # TODO: вручную реализовать настройки, перечисленные в n8n_manual_parameters,
         # если исходная версия Loop отличается от выбранного fallback.
         self.n8n_manual_parameters = n8n_manual_parameters
@@ -135,6 +199,18 @@ class Loop:
         self._feedback = None
         self._linked_item_index = 0
 
+    def _retry(self, action):
+        """Повторить внутренний шаг Loop по настройкам Retry On Fail."""
+        attempts = self.max_tries if self.retry_on_fail else 1
+        for attempt in range(attempts):
+            try:
+                return action()
+            except Exception:
+                if attempt + 1 >= attempts:
+                    raise
+                if self.wait_between_tries:
+                    time.sleep(self.wait_between_tries / 1000)
+
     def iterate(self, items):
         """Последовательно выдавать пакеты, ожидая collect после каждого.
 
@@ -143,7 +219,10 @@ class Loop:
         набор берётся из обратной связи, поэтому пустой результат останавливает
         цикл. Метод — генератор: тело выполняется между ``yield`` и ``collect``.
         """
-        current_items = deepcopy(list(items))
+        source_items = list(items)
+        if self.execute_once:
+            source_items = source_items[:1]
+        current_items = self._retry(lambda: deepcopy(source_items))
         self.done_items = []
         self.completed = not current_items
         self.results = {}
@@ -155,7 +234,7 @@ class Loop:
         # Reset трактует каждый вернувшийся набор как новое входное множество.
         if self.reset:
             while current_items:
-                batch = deepcopy(current_items[:self.batch_size])
+                batch = self._retry(lambda: deepcopy(current_items[:self.batch_size]))
                 self.done_items = []
                 self._feedback = None
                 yield batch
@@ -164,7 +243,7 @@ class Loop:
                 if not self._feedback:
                     self.completed = True
                     return
-                current_items = deepcopy(self._feedback)
+                current_items = self._retry(lambda: deepcopy(self._feedback))
             self.completed = True
             return
 
@@ -172,7 +251,7 @@ class Loop:
         # оставшуюся часть исходного набора: следующий пакет выбирается по offset.
         offset = 0
         while offset < len(current_items):
-            batch = deepcopy(current_items[offset:offset + self.batch_size])
+            batch = self._retry(lambda: deepcopy(current_items[offset:offset + self.batch_size]))
             self._feedback = None
             yield batch
             if self._feedback is None:
@@ -183,7 +262,10 @@ class Loop:
 
     def collect(self, items):
         """Передать выход обратной связи после выполнения текущего пакета."""
-        self._feedback = deepcopy(list(items))
+        source_items = list(items)
+        if self.execute_once:
+            source_items = source_items[:1]
+        self._feedback = self._retry(lambda: deepcopy(source_items))
 
     def record_result(self, node_name, items):
         """Добавить выход узла тела цикла к результатам прошлых итераций.

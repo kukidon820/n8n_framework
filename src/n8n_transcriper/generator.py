@@ -196,7 +196,7 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
                 issues.append((name, f"{label}: настройка {setting} для этого типа узла не поддерживается."))
         if node.get("onError", "stopWorkflow") != "stopWorkflow":
             issues.append((name, f"{label}: настройка onError не поддерживается."))
-        if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
+        if kind not in {"n8n-nodes-base.httpRequest", "n8n-nodes-base.splitInBatches"} and node.get("retryOnFail", False) is not False:
             issues.append((name, f"{label}: настройка retryOnFail не поддерживается."))
 
         if name in model_nodes:
@@ -891,7 +891,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 raise WorkflowError(f"Узел {name}: настройка {setting} для маршрутизации пока не поддерживается")
         if node.get("onError", "stopWorkflow") != "stopWorkflow":
             raise WorkflowError(f"Узел {name}: настройка onError пока не поддерживается")
-        if kind != "n8n-nodes-base.httpRequest" and node.get("retryOnFail", False) is not False:
+        if kind not in {"n8n-nodes-base.httpRequest", "n8n-nodes-base.splitInBatches"} and node.get("retryOnFail", False) is not False:
             raise WorkflowError(f"Узел {name}: настройка retryOnFail пока не поддерживается")
         # Триггеры намеренно не запускаются: сгенерированный проект вызывается вручную.
         # Конвертер узла возвращает исходник функции и зависимости её параметров.
@@ -1099,10 +1099,17 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 fanout = sum(1 for item in main_edges if item.source == edge.source and item.output == edge.output) > 1
                 calls.append(f"    items.extend({'deepcopy(' + value + ')' if fanout else value})")
             calls.extend([
-                # Экземпляр хранит batchSize/reset конкретного Loop из workflow.
-                f"    {loop_state_name} = Loop(batch_size={loop_settings.batch_size}, reset={loop_settings.reset!r}, n8n_manual_parameters={manual_parameters!r})"
-                if manual_parameters is not None else
-                f"    {loop_state_name} = Loop(batch_size={loop_settings.batch_size}, reset={loop_settings.reset!r})",
+                # Экземпляр хранит настройки пакетов и выполнения конкретного Loop.
+                (
+                    f"    {loop_state_name} = Loop("
+                    f"batch_size={loop_settings.batch_size}, reset={loop_settings.reset!r}"
+                    f"{', execute_once=True' if loop_settings.execute_once else ''}"
+                    f"{', retry_on_fail=True' if loop_settings.retry_on_fail else ''}"
+                    f"{', max_tries=' + repr(loop_settings.max_tries) if loop_settings.retry_on_fail else ''}"
+                    f"{', wait_between_tries=' + repr(loop_settings.wait_between_tries) if loop_settings.retry_on_fail else ''}"
+                    f"{', n8n_manual_parameters=' + repr(manual_parameters) if manual_parameters is not None else ''}"
+                    ")"
+                ),
                 f"    {aliases[name]} = [[] for _ in range({loop_settings.output_count})]",
                 f"    for loop_batch in {loop_state_name}.iterate(items):",
             ])
