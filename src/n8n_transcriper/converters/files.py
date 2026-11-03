@@ -430,10 +430,9 @@ def _generate_text_file(node: dict[str, Any], function_name: str, check: Any) ->
                     value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
                     mime_type = "application/json"
                 content = _encode_text(str(value), __ENCODING__, __ADD_BOM__)
-                result.append({
-                    "json": {},
-                    "binary": {__OUTPUT_FIELD__: _binary(content, __FILE_NAME__, mime_type)},
-                })
+                binary = dict(item.get("binary", {}))
+                binary[__OUTPUT_FIELD__] = _binary(content, __FILE_NAME__, mime_type)
+                result.append({**item, "json": dict(item.get("json", {})), "binary": binary})
             return result
         '''
     )
