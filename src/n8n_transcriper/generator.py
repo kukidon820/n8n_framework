@@ -18,6 +18,10 @@ from typing import Any
 from n8n_transcriper.converters.code import generate_code_node
 from n8n_transcriper.converters.ai import generate_ai_agent
 from n8n_transcriper.converters.conditions import generate_condition_node
+from n8n_transcriper.converters.data_table import (
+    DATA_TABLES_MODULE,
+    generate_data_table_node,
+)
 from n8n_transcriper.converters.edit_fields import generate_edit_fields
 from n8n_transcriper.converters.files import file_node_dependencies, generate_file_node
 from n8n_transcriper.converters.http import (
@@ -54,6 +58,7 @@ SUPPORTED_NODE_TYPES = {
     "n8n-nodes-base.emailSend",
     "n8n-nodes-base.set",
     "n8n-nodes-base.postgres",
+    "n8n-nodes-base.dataTable",
     "n8n-nodes-base.merge",
     "n8n-nodes-base.splitInBatches",
     "@n8n/n8n-nodes-langchain.agent",
@@ -71,6 +76,7 @@ _MANUAL_FALLBACK_LAYOUTS = {
     "n8n-nodes-base.emailSend": ("email_senders", "items, results, execution"),
     "n8n-nodes-base.set": ("operations", "items, results, execution"),
     "n8n-nodes-base.postgres": ("database", "items, results, execution"),
+    "n8n-nodes-base.dataTable": ("database", "items, results, execution"),
     "n8n-nodes-base.merge": ("operations", "merge_inputs"),
     "@n8n/n8n-nodes-langchain.agent": ("ai_nodes", "items, results, execution"),
     "n8n-nodes-base.if": ("operations", "items, results, execution"),
@@ -78,7 +84,12 @@ _MANUAL_FALLBACK_LAYOUTS = {
 }
 
 
-def _manual_version_fallback_source(node: dict[str, Any], function_name: str) -> str:
+def _manual_version_fallback_source(
+    node: dict[str, Any],
+    function_name: str,
+    *,
+    asynchronous: bool = False,
+) -> str:
     """Сгенерировать честный TODO-узел, если новая версия изменила схему.
 
     Узел явно прерывает запуск до ручной реализации, вместо того чтобы
@@ -91,9 +102,10 @@ def _manual_version_fallback_source(node: dict[str, Any], function_name: str) ->
         f"Узел {name} ({kind}, typeVersion={version!r}) требует ручной реализации. "
         "Проверьте n8n_manual_parameters и добавьте поведение узла."
     )
+    function_prefix = "async def" if asynchronous else "def"
     return (
         f'"""Ручная заготовка для узла {name!r}; автоматическая версия не распознана."""\n\n'
-        f"def {function_name}(*args, n8n_manual_parameters=None):\n"
+        f"{function_prefix} {function_name}(*args, n8n_manual_parameters=None):\n"
         '    """Заменить эту функцию реализацией исходного узла n8n."""\n'
         "    # TODO: реализовать исходную операцию и настройки узла вручную.\n"
         "    # Структура настроек передана в n8n_manual_parameters['parameters_template'];\n"
@@ -216,6 +228,8 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
                 if not isinstance(credential, dict) or not credential.get("id"):
                     issues.append((name, f"{label}: не указаны credentials PostgreSQL."))
                 generate_postgres_node(conversion_node, "run_node")
+            elif kind == "n8n-nodes-base.dataTable":
+                generate_data_table_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.merge":
                 generate_merge_node(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.splitInBatches":
@@ -270,7 +284,7 @@ def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
     Windows получают префикс. Если два имени совпали после нормализации, к ним
     добавляется стабильный короткий хеш ID узла.
     """
-    reserved = {"logging", "uuid", "deepcopy", "run", "postgres", "config", "main", "__init__", "items", "results", "execution", "input_data"}
+    reserved = {"logging", "uuid", "deepcopy", "run", "postgres", "data_tables", "config", "main", "__init__", "items", "results", "execution", "input_data"}
     reserved.update({"con", "prn", "aux", "nul"})
     reserved.update(f"{prefix}{i}" for prefix in ("com", "lpt") for i in range(1, 10))
     # Сначала нормализуем имена, затем отдельно разрешаем совпадения.
@@ -290,6 +304,18 @@ def _module_names(nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
     if len(set(result.values())) != len(result):
         raise WorkflowError("Не удалось построить уникальные имена модулей")
     return result
+
+
+def _default_data_table_name(mode: str, reference: str) -> str:
+    """Создать стабильное имя PostgreSQL-таблицы для ссылки из n8n."""
+    if mode == "name":
+        name = re.sub(r"[^a-z0-9_]+", "_", reference.lower()).strip("_")
+        if name:
+            if name[0].isdigit():
+                name = "t_" + name
+            return "n8n_" + name[:48]
+    suffix = hashlib.sha256(reference.encode("utf-8")).hexdigest()[:16]
+    return f"n8n_data_table_{suffix}"
 
 
 def _project_toml(dependencies: set[str]) -> str:
@@ -549,6 +575,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     http_credentials: set[str] = set()
     http_credential_descriptions: dict[str, set[str]] = {}
     postgres_credential = None
+    uses_data_tables = False
+    data_table_mappings: dict[str, str] = {}
     version_notes: list[tuple[str, str]] = []
     # Для каждого узла создаём отдельный модуль; ниже формируется его вызов в main.py.
     for name in order:
@@ -688,6 +716,26 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                 arguments = "items, results, execution"
                 dependencies.add("psycopg[binary]>=3.1")
                 files["database/postgres.py"] = POSTGRES_MODULE
+            elif kind == "n8n-nodes-base.dataTable":
+                folder = "database"
+                uses_data_tables = True
+                dependencies.add("asyncpg>=0.29")
+                files["database/data_tables.py"] = DATA_TABLES_MODULE
+                source, references, table_reference = generate_data_table_node(
+                    conversion_node, function
+                )
+                missing = references - (completed & ancestors[name] if branching else completed)
+                if missing:
+                    raise WorkflowError(
+                        f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}"
+                    )
+                arguments = "items, results, execution"
+                if table_reference is not None:
+                    mode, reference = table_reference
+                    data_table_mappings.setdefault(
+                        reference,
+                        f"public.{_default_data_table_name(mode, reference)}",
+                    )
             elif kind == "n8n-nodes-base.merge":
                 folder = "operations"
                 source, input_count = generate_merge_node(conversion_node, function)
@@ -735,7 +783,11 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             )
             if kind == "n8n-nodes-base.httpRequest" and is_gmail_send_node(node):
                 folder = "email_senders"
-            source = _manual_version_fallback_source(node, function)
+            source = _manual_version_fallback_source(
+                node,
+                function,
+                asynchronous=kind == "n8n-nodes-base.dataTable",
+            )
             if kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
                 connected_ports = [edge.output for edge in main_edges if edge.source == name]
                 output_count = max(connected_ports, default=1) + 1
@@ -744,6 +796,11 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
         call_arguments = arguments
         if manual_parameters is not None:
             call_arguments += f", n8n_manual_parameters={manual_parameters!r}"
+        invocation = (
+            f"await {stem}({call_arguments})"
+            if kind == "n8n-nodes-base.dataTable"
+            else f"{stem}({call_arguments})"
+        )
         # Сохраняем исходник модуля и регистрируем импорт для явного вызова из main.py.
         files[f"{folder}/{stem}.py"] = source
         files[f"{folder}/__init__.py"] = ""
@@ -819,7 +876,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
             else:
                 if linked_items and kind != "n8n-nodes-base.merge":
                     calls.append("        source_items = items")
-                calls.append(f"        items = {stem}({call_arguments})")
+                calls.append(f"        items = {invocation}")
                 if node.get("alwaysOutputData", False):
                     calls.extend(['        if not items:', '            items = [{"json": {}}]'])
                 if linked_items:
@@ -837,6 +894,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                             if name in loop_body_nodes else
                             f"        items = _link_lineage(source_items, items, {name!r})"
                         )
+                if kind == "n8n-nodes-base.dataTable":
+                    calls.append("        for output_item in items: output_item.pop('pairedItem', None)")
                 stored_items = (
                     f"{loop_state_name}.record_result({name!r}, items)"
                     if name in loop_body_nodes else "items"
@@ -856,7 +915,7 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                 calls.append("    items = items[:1]")
             if linked_items:
                 calls.append("    source_items = items")
-            calls.append(f"    items = {stem}({call_arguments})")
+            calls.append(f"    items = {invocation}")
             if node.get("alwaysOutputData", False):
                 calls.extend(['    if not items:', '        items = [{"json": {}}]'])
             if linked_items:
@@ -866,6 +925,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                     if name in loop_body_nodes else
                     f"    items = _link_lineage(source_items, items, {name!r})"
                 )
+            if kind == "n8n-nodes-base.dataTable":
+                calls.append("    for output_item in items: output_item.pop('pairedItem', None)")
             stored_items = (
                 f"{loop_state_name}.record_result({name!r}, items)"
                 if name in loop_body_nodes else "items"
@@ -1011,9 +1072,43 @@ def _clean_items(items):
         item.pop("__transcriper_sources", None)
     return items
 ''') if linked_items else ""
-    files["main.py"] = ('"""Точка ручного запуска сгенерированного workflow."""\n\nimport logging\nimport sys\nimport uuid\n' + ('from copy import deepcopy\n' if branching else '') + '\n' + '\n'.join(imports) +
-        '\n\n\n' + lineage_helpers + '\n\ndef run(input_data=None):\n    """Вручную выполнить сгенерированную цепочку узлов.\n\n    Args:\n        input_data: Необязательный список n8n items вида {"json": {...}}.\n            Если аргумент не задан, workflow получает один пустой item.\n\n    Returns:\n        Items терминальных узлов с удалёнными служебными полями lineage.\n    """\n    items = input_data if input_data is not None else [{"json": {}}]\n    results = {}\n    execution = {"id": str(uuid.uuid4())}\n' +
-        '\n'.join(calls) + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n\n\nif __name__ == "__main__":\n    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)\n    run()\n')
+    runner_name = "run_async" if uses_data_tables else "run"
+    runner_definition = "async def" if uses_data_tables else "def"
+    asyncio_import = "import asyncio\n" if uses_data_tables else ""
+    sync_wrapper = (
+        "\n\ndef run(input_data=None):\n"
+        "    \"\"\"Синхронная обёртка для ручного запуска асинхронного workflow.\"\"\"\n"
+        "    return asyncio.run(run_async(input_data))\n"
+        if uses_data_tables
+        else ""
+    )
+    files["main.py"] = (
+        '"""Точка ручного запуска сгенерированного workflow."""\n\n'
+        + asyncio_import
+        + "import logging\nimport sys\nimport uuid\n"
+        + ("from copy import deepcopy\n" if branching else "")
+        + "\n"
+        + "\n".join(imports)
+        + "\n\n\n"
+        + lineage_helpers
+        + f'\n\n{runner_definition} {runner_name}(input_data=None):\n'
+        + '    """Вручную выполнить сгенерированную цепочку узлов.\n\n'
+        + '    Args:\n'
+        + '        input_data: Необязательный список n8n items вида {"json": {...}}.\n'
+        + '            Если аргумент не задан, workflow получает один пустой item.\n\n'
+        + '    Returns:\n'
+        + '        Items терминальных узлов с удалёнными служебными полями lineage.\n'
+        + '    """\n'
+        + '    items = input_data if input_data is not None else [{"json": {}}]\n'
+        + '    results = {}\n'
+        + '    execution = {"id": str(uuid.uuid4())}\n'
+        + "\n".join(calls)
+        + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n'
+        + sync_wrapper
+        + '\n\nif __name__ == "__main__":\n'
+        + '    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)\n'
+        + '    run()\n'
+    )
     files["run.bat"] = (
         "@echo off\n"
         "setlocal\n"
@@ -1081,13 +1176,19 @@ def _clean_items(items):
         for description in sorted(http_credential_descriptions.get(key, set())):
             config += f'\n# {description}.\n'
         config += f'{key} = os.getenv({key!r}, "")\n'
-    if postgres_credential is not None:
+    if postgres_credential is not None or uses_data_tables:
         config += ('\n# Подключение к PostgreSQL; пароль не хранится в исходном workflow.\n'
                    'POSTGRES_HOST = os.getenv("POSTGRES_HOST", "")\n'
                    'POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))\n'
                    'POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "")\n'
                    'POSTGRES_USER = os.getenv("POSTGRES_USER", "")\n'
-                   'POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")\n')
+                   'POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")\n'
+                   'POSTGRES_CONNECT_TIMEOUT = float(os.getenv("POSTGRES_CONNECT_TIMEOUT", "30"))\n')
+    if uses_data_tables:
+        config += (
+            '\n# Сопоставление ссылок n8n Data Table с именами таблиц PostgreSQL.\n'
+            f'DATA_TABLES = {data_table_mappings!r}\n'
+        )
     files["config.py"] = config
     files["requirements.txt"] = ''.join(f'{dependency}\n' for dependency in sorted(dependencies))
     files["pyproject.toml"] = _project_toml(dependencies)
@@ -1104,9 +1205,29 @@ def _clean_items(items):
     if uses_email_send and not uses_smtp:
         required.append("SMTP_HOST")
     required.extend(sorted(http_credentials))
-    if postgres_credential is not None:
+    if postgres_credential is not None or uses_data_tables:
         required.extend(["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"])
     credentials = ', '.join(f'`{key}`' for key in required) if required else 'не требуются'
+    data_table_documentation = ""
+    if uses_data_tables:
+        data_table_documentation = (
+            "## Data Tables\n\n"
+            "Операции строк Data Table выполняются через асинхронный asyncpg. "
+            "Укажите подключение в POSTGRES_HOST, POSTGRES_PORT, POSTGRES_DATABASE, "
+            "POSTGRES_USER и POSTGRES_PASSWORD. "
+            "Ссылки n8n на таблицы сопоставляются с именами PostgreSQL через словарь DATA_TABLES "
+            "в config.py; проверьте это сопоставление и заранее создайте соответствующие таблицы "
+            "со столбцами, используемыми workflow. Таблице нужны системные столбцы id, createdAt "
+            "и updatedAt; id должен генерироваться PostgreSQL, даты должны иметь тип TIMESTAMPTZ. "
+            "Пример: id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY, "
+            '"createdAt" TIMESTAMPTZ NOT NULL, "updatedAt" TIMESTAMPTZ NOT NULL. '
+            "При insert/upsert даты устанавливаются автоматически, updatedAt также обновляется при update/upsert. "
+            "Данные внутренних таблиц n8n автоматически в PostgreSQL проекта не копируются.\n\n"
+            "Каждая найденная строка возвращается отдельным item в форме "
+            '{"json": {"id": "...", "createdAt": "...", "updatedAt": "...", "...": "..."}}. '
+            "Даты и время переводятся в ISO-строки. При асинхронном встраивании вызывайте "
+            "run_async через await.\n\n"
+        )
     trigger_documentation = ""
     if skipped_triggers:
         trigger_sections = []
@@ -1147,6 +1268,7 @@ def _clean_items(items):
         'Проект запускает преобразованный workflow как обычную Python-программу. Исходный JSON для запуска не нужен.\n\n'
         + trigger_documentation
         + version_documentation
+        + data_table_documentation
         + '## Требования и установка\n\n'
         'Нужен Python 3.12 или новее и установленный uv. Файл `.python-version` выбирает Python 3.12 для команд uv. '
         'Зависимости указаны в `pyproject.toml`, '
