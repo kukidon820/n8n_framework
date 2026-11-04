@@ -274,6 +274,7 @@ def render_langgraph_main(
     workflow: dict[str, Any],
     module_names: dict[str, str],
     loop_info: dict[str, Any] | None = None,
+    agent_nodes: set[str] | None = None,
 ) -> str:
     """Generate ``main.py`` with every supported node represented in LangGraph.
 
@@ -282,6 +283,7 @@ def render_langgraph_main(
     handles nodes before and after the loop.
     """
     nodes = {node["name"]: node for node in workflow["nodes"]}
+    agent_nodes = agent_nodes or set()
     edges = connections(workflow)
     model_names = {
         edge.source
@@ -293,7 +295,7 @@ def render_langgraph_main(
     main_nodes = set(nodes) - model_names
     all_main_edges = [edge for edge in edges if edge.channel == "main"]
     if loop_info is not None:
-        return _render_loop_graph(workflow, nodes, module_names, loop_info)
+        return _render_loop_graph(workflow, nodes, module_names, loop_info, agent_nodes)
     if (
         any(node.get("type") == "n8n-nodes-base.splitInBatches" for node in nodes.values())
         and loop_info is None
@@ -310,6 +312,9 @@ def render_langgraph_main(
         for name in main_nodes
     }
     folders = _folders(nodes)
+    for name in agent_nodes:
+        if name in folders:
+            folders[name] = "ai_nodes"
     linked_names = {
         name
         for node in nodes.values()
@@ -439,6 +444,7 @@ def _render_loop_graph(
     nodes: dict[str, dict[str, Any]],
     module_names: dict[str, str],
     loop_info: dict[str, Any],
+    agent_nodes: set[str],
 ) -> str:
     """Собрать внешнюю последовательность и вложенный граф тела Loop."""
     full_order = loop_info["order"]
@@ -457,6 +463,9 @@ def _render_loop_graph(
         for name in full_order
     }
     folders = _folders(nodes)
+    for name in agent_nodes:
+        if name in folders:
+            folders[name] = "ai_nodes"
     linked_names = {
         referenced
         for node in nodes.values()
