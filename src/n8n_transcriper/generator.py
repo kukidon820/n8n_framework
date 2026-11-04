@@ -1822,7 +1822,12 @@ def _update_partial_conversion_report(
     files["conversion_report.md"] = report
 
 
-def generate_project(workflow: dict[str, Any], output: Path | None = None) -> dict[str, str]:
+def generate_project(
+    workflow: dict[str, Any],
+    output: Path | None = None,
+    *,
+    langgraph: bool = False,
+) -> dict[str, str]:
     """Generate a project while recording and omitting untranslatable workflow parts.
 
     When a node-specific conversion error occurs, that node is removed and the
@@ -1844,6 +1849,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
     while candidate.get("nodes"):
         try:
             files = _generate_supported_project(candidate)
+            if langgraph:
+                files = _apply_langgraph_mode(candidate, files)
             break
         except Exception as exc:
             last_error = str(exc) or f"{type(exc).__name__}: ошибка конвертера"
@@ -1870,6 +1877,8 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
                     continue
                 try:
                     trial_files = _generate_supported_project(trial)
+                    if langgraph:
+                        trial_files = _apply_langgraph_mode(trial, trial_files)
                 except Exception:
                     continue
                 forced_skips = trial_skips
@@ -1891,7 +1900,67 @@ def generate_project(workflow: dict[str, Any], output: Path | None = None) -> di
 
     if files is None:
         files = _empty_partial_project()
+        if langgraph:
+            files = _apply_langgraph_mode(candidate, files)
     _update_partial_conversion_report(files, original_nodes, original_count, skipped_parts)
     _append_skipped_part_notes(files, skipped_parts)
     _write_project_files(files, output)
+    return files
+
+
+def _apply_langgraph_mode(
+    workflow: dict[str, Any], files: dict[str, str]
+) -> dict[str, str]:
+    """Add the opt-in LangGraph runner without changing default generation."""
+    from n8n_transcriper.langgraph_mode.renderer import render_langgraph_main
+
+    main_source = files.get("main.py")
+    if not main_source or not workflow.get("nodes"):
+        return files
+    node_map = {
+        node["name"]: node
+        for node in workflow.get("nodes", [])
+        if isinstance(node, dict) and isinstance(node.get("name"), str)
+    }
+    edges = connections(workflow)
+    model_names = {
+        edge.source
+        for edge in edges
+        if edge.channel == "ai_languageModel"
+        and edge.target in node_map
+        and node_map[edge.target].get("type") == "@n8n/n8n-nodes-langchain.agent"
+    }
+    main_nodes = set(node_map) - model_names
+    all_main_edges = [edge for edge in edges if edge.channel == "main"]
+    feedback_edges = loop_feedback_edges(workflow)
+    base_order = [
+        name for name in execution_order(workflow) if name not in model_names
+    ]
+    loop_info = _loop_layout(
+        node_map, main_nodes, all_main_edges, base_order, feedback_edges
+    )
+    files["main.py"] = render_langgraph_main(
+        workflow,
+        _module_names(node_map),
+        loop_info=loop_info,
+    )
+
+    dependencies = {
+        line.strip()
+        for line in files.get("requirements.txt", "").splitlines()
+        if line.strip()
+    }
+    dependencies.add("langgraph>=1.0")
+    files["requirements.txt"] = "".join(
+        f"{dependency}\n" for dependency in sorted(dependencies)
+    )
+    files["pyproject.toml"] = _project_toml(dependencies)
+    readme = files.get("README.md", "")
+    files["README.md"] = (
+        readme
+        + "\n## LangGraph\n\n"
+        + "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u0444\u043b\u0430\u0433 `--langgraph`, \u0447\u0442\u043e\u0431\u044b \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0442\u044c workflow \u0447\u0435\u0440\u0435\u0437 LangGraph. "
+        + "\u041a\u0430\u0436\u0434\u044b\u0439 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u044b\u0439 \u0443\u0437\u0435\u043b \u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0441\u044f \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u043c \u0448\u0430\u0433\u043e\u043c \u0433\u0440\u0430\u0444\u0430. \u0422\u0435\u043b\u043e `Loop Over Items` "
+        + "\u0441\u043e\u0437\u0434\u0430\u0451\u0442\u0441\u044f \u043a\u0430\u043a \u0432\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0439 \u0433\u0440\u0430\u0444, \u0430 \u0443\u0437\u043b\u044b \u0434\u043e \u0438 \u043f\u043e\u0441\u043b\u0435 \u0446\u0438\u043a\u043b\u0430 \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u0448\u0430\u0433\u0430\u043c\u0438 \u043e\u0441\u043d\u043e\u0432\u043d\u043e\u0433\u043e \u0433\u0440\u0430\u0444\u0430.\n"
+    )
     return files
