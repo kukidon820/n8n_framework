@@ -152,6 +152,8 @@ def _indentation_error_details(source: str, error: IndentationError) -> str:
 def _validate_generated_project(
     workflow: dict,
     known_invalid_nodes: set[str],
+    *,
+    langgraph: bool = False,
 ) -> tuple[list[str], int]:
     """Проверить генерацию файлов, собирая ошибки нескольких узлов.
 
@@ -171,7 +173,7 @@ def _validate_generated_project(
                 _make_validation_placeholder(node)
 
         try:
-            files = generate_project(candidate)
+            files = generate_project(candidate, langgraph=langgraph)
         except WorkflowError as exc:
             name = _node_name_for_error(str(exc), nodes)
             if name is not None and name not in invalid_nodes:
@@ -216,6 +218,11 @@ def main() -> None:
 def convert(
     workflow: Path = typer.Argument(help="Путь к JSON-файлу workflow."),
     out: Path = typer.Option(..., "--out", help="Пустая папка для сгенерированного проекта."),
+    langgraph: bool = typer.Option(
+        False,
+        "--langgraph",
+        help="Сгенерировать проект с точкой запуска на LangGraph.",
+    ),
 ) -> None:
     """Проверить workflow, сгенерировать проект и зафиксировать его зависимости.
 
@@ -228,7 +235,7 @@ def convert(
         warnings = node_version_warnings(data)
         for _, warning in warnings:
             _echo_terminal_safe(f"Предупреждение: {warning}")
-        generate_project(data, out)
+        generate_project(data, out, langgraph=langgraph)
         _create_uv_lock(out)
     except (WorkflowError, OSError) as exc:
         typer.echo(f"Ошибка: {exc}", err=True)
@@ -254,7 +261,14 @@ def inspect(workflow: Path = typer.Argument(help="Путь к JSON-файлу wo
 
 
 @app.command()
-def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу workflow.")) -> None:
+def validate(
+    workflow: Path = typer.Argument(help="Путь к JSON-файлу workflow."),
+    langgraph: bool = typer.Option(
+        False,
+        "--langgraph",
+        help="Проверить проект, который будет сгенерирован для LangGraph.",
+    ),
+) -> None:
     """Собрать структурные, графовые и конверсионные ошибки workflow.
 
     Проверка выполняется по этапам: чтение JSON, структура, параметры узлов,
@@ -274,7 +288,11 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
     # Сначала собираются независимые ошибки структуры и настроек каждого узла.
     structural_issues = validate_workflow_issues(data)
     issues.extend(("проверка структуры", issue) for issue in structural_issues)
-    node_issues = node_conversion_issues(data)
+    manual_fallback_warnings: list[tuple[str | None, str]] = []
+    node_issues = node_conversion_issues(
+        data,
+        manual_fallback_warnings=manual_fallback_warnings,
+    )
     issues.extend(("проверка узлов и настроек", issue) for _, issue in node_issues)
 
     edges = []
@@ -295,6 +313,7 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
             generation_issues, python_file_count = _validate_generated_project(
                 data,
                 {name for name, _ in node_issues if name is not None},
+                langgraph=langgraph,
             )
             issues.extend(("проверка узлов, настроек и expressions", issue) for issue in generation_issues)
         except (OSError, KeyError, TypeError, ValueError) as exc:
@@ -305,6 +324,8 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
         _echo_terminal_safe(f"Файл: {workflow}", err=True)
         _echo_terminal_safe(f"Обнаружено проблем: {len(issues)}", err=True)
         for _, warning in version_warnings:
+            _echo_terminal_safe(f"Предупреждение: {warning}", err=True)
+        for _, warning in manual_fallback_warnings:
             _echo_terminal_safe(f"Предупреждение: {warning}", err=True)
         for index, (stage, issue) in enumerate(issues, start=1):
             _echo_terminal_safe(f"{index}. [{stage}] {issue}", err=True)
@@ -325,4 +346,6 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
     _echo_terminal_safe(f"Синтаксис сгенерированного Python проверен: {python_file_count} файлов.")
     _echo_terminal_safe("Ошибок совместимости, графа и expressions не найдено.")
     for _, warning in version_warnings:
+        _echo_terminal_safe(f"Предупреждение: {warning}")
+    for _, warning in manual_fallback_warnings:
         _echo_terminal_safe(f"Предупреждение: {warning}")

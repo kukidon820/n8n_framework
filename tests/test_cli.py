@@ -65,6 +65,33 @@ def test_validate_checks_conversion_without_creating_output(tmp_path):
     assert not (tmp_path / "generated").exists()
 
 
+def test_convert_and_validate_offer_opt_in_langgraph_mode(tmp_path, monkeypatch):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(json.dumps({
+        "nodes": [{
+            "id": "1", "name": "Build", "type": "n8n-nodes-base.code",
+            "parameters": {"language": "pythonNative", "pythonCode": "return _items"},
+        }],
+        "connections": {},
+    }), encoding="utf-8")
+    output = tmp_path / "generated"
+    monkeypatch.setattr("n8n_transcriper.cli._create_uv_lock", lambda _out: None)
+
+    result = CliRunner().invoke(
+        app,
+        ["convert", str(workflow), "--out", str(output), "--langgraph"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "StateGraph" in (output / "main.py").read_text(encoding="utf-8")
+    assert "langgraph>=1.0" in (output / "requirements.txt").read_text(encoding="utf-8")
+
+    validation = CliRunner().invoke(app, ["validate", str(workflow), "--langgraph"])
+
+    assert validation.exit_code == 0, validation.output
+    assert validation.output
+
+
 def test_validate_reports_node_and_stage_for_unsupported_node(tmp_path):
     workflow = tmp_path / "workflow.json"
     workflow.write_text(json.dumps({

@@ -53,3 +53,28 @@ def test_unknown_file_option_fails():
         "operation": "toText", "sourceProperty": "x", "options": {"unknown": True}}}
     with pytest.raises(WorkflowError, match="unknown"):
         generate_file_node(node, "run")
+
+
+@pytest.mark.parametrize("version", [1, 1.2, 2.0])
+def test_explicit_data_is_base64_is_used_across_node_versions(version):
+    node = {
+        "name": "Text to Binary",
+        "type": "n8n-nodes-base.convertToFile",
+        "typeVersion": version,
+        "parameters": {
+            "operation": "toBinary",
+            "sourceProperty": "payload",
+            "binaryPropertyName": "file",
+            "options": {
+                "dataIsBase64": False,
+                "fileName": "payload.txt",
+                "encoding": "utf8",
+            },
+        },
+    }
+    namespace = {}
+    exec(generate_file_node(node, "run"), namespace)
+
+    result = asyncio.run(namespace["run"]([{"json": {"payload": "plain text"}}]))
+
+    assert result[0]["binary"]["file"]["data"] == b"plain text"
