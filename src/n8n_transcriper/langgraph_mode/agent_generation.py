@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from n8n_transcriper.converters.ai import generate_ai_agent
 from n8n_transcriper.converters.http import (
@@ -131,7 +131,10 @@ def _http_auth_defaults(node: dict[str, Any]) -> tuple[str, str, str]:
     fields = http_credential_fields(node)
     raw_url = parameters.get("url", "")
     query_names = {key.casefold() for key, _ in parse_qsl(urlsplit(raw_url).query)} if isinstance(raw_url, str) else set()
-    if query_names & {"key", "api_key", "apikey"}:
+    host = (urlsplit(raw_url).hostname or "").casefold() if isinstance(raw_url, str) else ""
+    if host == "generativelanguage.googleapis.com" and query_names & {
+        "key", "api_key", "apikey"
+    }:
         return "", "x-goog-api-key", ""
     if auth_kind == "httpBearerAuth" and "TOKEN" in fields:
         return f"config.{fields['TOKEN']}", "Authorization", "Bearer "
@@ -191,6 +194,172 @@ def _header_code(node: dict[str, Any]) -> tuple[str, set[str]]:
             ").decode()"
         )
     return "headers = {" + ", ".join(values) + "}", dependencies
+
+
+def _safe_endpoint_url(url: str) -> str:
+    """Remove URL-embedded credentials before writing a custom endpoint to config."""
+    parsed = urlsplit(url)
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    if parsed.port is not None:
+        host = f"{host}:{parsed.port}"
+    secret_query_names = {
+        "key", "api_key", "apikey", "token", "access_token", "client_secret",
+        "secret", "authorization", "x-api-key",
+    }
+    safe_query = urlencode(
+        [
+            (name, value)
+            for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if name.casefold() not in secret_query_names
+        ]
+    )
+    return urlunsplit((parsed.scheme, host, parsed.path, safe_query, ""))
+
+
+def _generate_openai_compatible_endpoint_node(
+    node: dict[str, Any], module_name: str
+) -> tuple[str, str, set[str]]:
+    """Generate a LangGraph ChatModel that sends to a custom URL unchanged."""
+    node_name = str(node.get("name") or "HTTP Request")
+    parameters = node.get("parameters", {})
+    body_code, references = _request_body(node)
+    header_code, header_references = _header_code(node)
+    references.update(header_references)
+    prefix = f"LANGGRAPH_HTTP_{re.sub(r'[^A-Z0-9]+', '_', module_name.upper()).strip('_')}"
+    endpoint = _safe_endpoint_url(str(parameters.get("url", "")))
+    default_key, default_header, default_prefix = _http_auth_defaults(node)
+    api_key_default = default_key.removeprefix("config.") if default_key else "''"
+    config_block = (
+        f"\n# Custom OpenAI-compatible endpoint settings for HTTP node {node_name!r}.\n"
+        f"{prefix}_ENDPOINT_URL = os.getenv({(prefix + '_ENDPOINT_URL')!r}, {endpoint!r})\n"
+        f"{prefix}_API_KEY = os.getenv({(prefix + '_API_KEY')!r}, {api_key_default})\n"
+        f"{prefix}_API_KEY_HEADER = os.getenv({(prefix + '_API_KEY_HEADER')!r}, {default_header!r})\n"
+        f"{prefix}_API_KEY_PREFIX = os.getenv({(prefix + '_API_KEY_PREFIX')!r}, {default_prefix!r})\n"
+    )
+    source = f'''"""Custom OpenAI-compatible LangGraph model generated from {node_name!r}."""
+
+from typing import Any
+
+import base64
+import httpx
+import config
+from langchain.agents import create_agent
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
+{_message_helpers()}
+
+
+class WorkflowEndpointChatModel(BaseChatModel):
+    """Call the workflow's original custom endpoint using an async LangGraph model."""
+
+    model: str
+    endpoint: str
+    request_headers: dict[str, str]
+    request_options: dict[str, Any]
+    timeout: float = 180.0
+
+    @property
+    def _llm_type(self) -> str:
+        return "workflow-openai-compatible-endpoint"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        raise NotImplementedError("This generated endpoint model supports async calls only")
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        request_messages = []
+        for message in messages:
+            if isinstance(message, SystemMessage):
+                role = "system"
+            elif isinstance(message, HumanMessage):
+                role = "user"
+            elif isinstance(message, ToolMessage):
+                role = "tool"
+            elif isinstance(message, AIMessage):
+                role = "assistant"
+            else:
+                raise TypeError(f"Unsupported LangChain message type: {{type(message).__name__}}")
+            entry = {{"role": role, "content": message.content}}
+            if isinstance(message, ToolMessage):
+                entry["tool_call_id"] = message.tool_call_id
+            request_messages.append(entry)
+
+        request_body = dict(self.request_options)
+        request_body["model"] = self.model
+        request_body["messages"] = request_messages
+        if stop is not None:
+            request_body["stop"] = stop
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                self.endpoint,
+                headers=self.request_headers,
+                json=request_body,
+            )
+        response.raise_for_status()
+        response_body = response.json()
+        try:
+            content = response_body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise ValueError(
+                "Custom AI endpoint must return an OpenAI-compatible "
+                "choices[0].message.content response"
+            ) from exc
+        message = AIMessage(content=content)
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+async def run_node(items, results, execution):
+    """Run each compiled prompt through an agent using the original HTTP URL."""
+    output = []
+    for item in items:
+        payload = {body_code}
+        if not isinstance(payload, dict):
+            raise TypeError("AI Request body must evaluate to a JSON object")
+        {header_code}
+        model_name = payload.get("model")
+        if not isinstance(model_name, str) or not model_name:
+            raise ValueError("Узел {node_name}: укажите поле model в JSON body")
+
+        api_key = config.{prefix}_API_KEY
+        header_name = config.{prefix}_API_KEY_HEADER
+        header_prefix = config.{prefix}_API_KEY_PREFIX
+        header_value = headers.get(header_name) or next(
+            (value for name, value in headers.items()
+             if name.casefold() in {{"authorization", "x-api-key", "api-key", "x-goog-api-key"}}),
+            None,
+        )
+        if header_value:
+            api_key = str(header_value)
+            if header_prefix and api_key.casefold().startswith(header_prefix.casefold()):
+                api_key = api_key[len(header_prefix):]
+            elif api_key.casefold().startswith("bearer "):
+                api_key = api_key[7:]
+        elif api_key and header_prefix:
+            headers[header_name] = f"{{header_prefix}}{{api_key}}"
+        request_options = {{
+            key: value for key, value in payload.items()
+            if key not in {{"model", "messages"}}
+        }}
+        model = WorkflowEndpointChatModel(
+            model=model_name,
+            endpoint=config.{prefix}_ENDPOINT_URL,
+            request_headers=headers,
+            request_options=request_options,
+        )
+        agent = create_agent(model=model, tools=[])
+        result = await agent.ainvoke({{"messages": _messages_from_payload(payload)}})
+        messages = result.get("messages", [])
+        if not messages:
+            raise ValueError("LangGraph agent не вернул ответ модели")
+        text = _message_text(messages[-1])
+        output.append({{"json": _response_body("openai_compatible", text, model_name)}})
+    return output
+'''
+    return source, config_block, references
 
 
 def _provider_import(provider: str) -> str:
@@ -391,6 +560,8 @@ def generate_http_agent_node(
     """Replace a detected HTTP model call with a provider-backed LangGraph agent."""
     if not detection.is_ai or detection.provider not in _MODEL_PACKAGES:
         raise WorkflowError("Для HTTP-узла не удалось выбрать поддержку LangChain ChatModel")
+    if detection.provider == "openai_compatible" and detection.endpoint is None:
+        return _generate_openai_compatible_endpoint_node(node, module_name)
     if detection.provider == "gemini" and detection.operation == "interactions":
         return _generate_gemini_interactions_node(node, module_name)
     node_name = str(node.get("name") or "HTTP Request")

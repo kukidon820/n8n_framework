@@ -2052,6 +2052,8 @@ def _apply_langgraph_mode(
             ai_providers.add(detection.provider or "openai_compatible")
             if detection.provider == "gemini" and detection.operation == "interactions":
                 ai_dependencies.add("google-genai>=2.3.0")
+            elif detection.provider == "openai_compatible" and detection.endpoint is None:
+                ai_dependencies.update({"langchain>=1.0", "httpx>=0.27"})
             else:
                 ai_dependencies.update({
                     "langchain>=1.0",
@@ -2116,6 +2118,7 @@ def _apply_langgraph_mode(
             "\n### AI-\u0443\u0437\u043b\u044b \u0432 LangGraph\n\n"
             "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 HTTP-\u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432 \u043d\u0430 AI \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0440\u0438 `--langgraph`. \u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440 \u0443\u0447\u0438\u0442\u044b\u0432\u0430\u0435\u0442 host/endpoint \u0438 \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0443 JSON body; \u043e\u0434\u043d\u043e\u0433\u043e \u043f\u043e\u043b\u044f `messages` \u0431\u0435\u0437 \u043c\u043e\u0434\u0435\u043b\u0438, \u0440\u043e\u043b\u0435\u0439 \u0438 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438 \u043d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e.\n\n"
             "\u0418\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0435 endpoint-\u0444\u043e\u0440\u043c\u044b: OpenAI/DeepSeek `/v1/chat/completions`, OpenRouter `/api/v1/chat/completions`, Anthropic `/v1/messages`, Gemini `:generateContent` \u0438 `/v1/interactions`, Ollama `/api/chat` \u0438 `/api/generate`. \u0414\u043b\u044f \u0441\u0432\u043e\u0438\u0445 URL \u043d\u0443\u0436\u0435\u043d\u0430 \u043f\u043e\u043b\u043d\u0430\u044f \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0430 \u043c\u043e\u0434\u0435\u043b\u0438, role-based messages \u0438 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438.\n\n"
+            "Для внутренних endpoint с распознанной OpenAI-compatible структурой используется точный URL узла (без секретных query-параметров); ответ API должен содержать choices[0].message.content.\n\n"
             f"\u0412 \u044d\u0442\u043e\u043c workflow \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u044b \u043f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440\u044b: {provider_names}.\n\n"
             "\u041e\u0431\u044b\u0447\u043d\u044b\u0435 HTTP AI-\u0437\u0430\u043f\u0440\u043e\u0441\u044b \u0438 n8n AI Agent \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u044e\u0442\u0441\u044f \u0447\u0435\u0440\u0435\u0437 `create_agent` \u0438 provider ChatModel. Gemini Interactions API \u0432\u044b\u0437\u044b\u0432\u0430\u0435\u0442\u0441\u044f \u0430\u0441\u0438\u043d\u0445\u0440\u043e\u043d\u043d\u044b\u043c Google GenAI SDK, \u0447\u0442\u043e\u0431\u044b \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u0443\u0434\u0430\u043b\u0451\u043d\u043d\u043e\u0433\u043e \u0430\u0433\u0435\u043d\u0442\u0430. \u0421\u0435\u043a\u0440\u0435\u0442\u044b \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u0432 `config.py`/env.\n"
         )
