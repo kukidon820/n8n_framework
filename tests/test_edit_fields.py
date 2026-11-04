@@ -175,3 +175,54 @@ def test_legacy_include_mode_is_respected(include, expected):
 
     assert result[0]["json"] == expected
     assert result[0]["binary"] == item["binary"]
+
+
+@pytest.mark.parametrize("version,option,expected_binary", [
+    (3.2, "stripBinary", False),
+    (3.2, "includeBinary", False),
+    (3.6, "includeBinary", True),
+    (3.6, "stripBinary", True),
+])
+def test_known_binary_options_are_not_rejected_by_node_version(
+    version, option, expected_binary
+):
+    node = {
+        "name": "Cross-version Edit Fields",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": version,
+        "parameters": {
+            "includeOtherFields": True,
+            "options": {
+                option: not expected_binary if option == "stripBinary" else expected_binary
+            },
+            "assignments": {"assignments": []},
+        },
+    }
+    source, _ = generate_edit_fields(compatible_node(node), "run")
+    namespace = {}
+    exec(source, namespace)
+    item = {"json": {"keep": True}, "binary": {"data": {"data": b"file"}}}
+
+    result = asyncio.run(namespace["run"]([item], {}, {}))
+
+    assert result[0]["json"] == item["json"]
+    assert ("binary" in result[0]) is expected_binary
+
+
+def test_include_other_fields_is_read_even_for_legacy_type_version():
+    node = {
+        "name": "Legacy Edit Fields",
+        "type": "n8n-nodes-base.set",
+        "typeVersion": 3.2,
+        "parameters": {
+            "includeOtherFields": True,
+            "assignments": {"assignments": []},
+        },
+    }
+    source, _ = generate_edit_fields(compatible_node(node), "run")
+    namespace = {}
+    exec(source, namespace)
+
+    assert asyncio.run(namespace["run"]([{"json": {"keep": True}}], {}, {})) == [
+        {"json": {"keep": True}}
+    ]

@@ -12,13 +12,6 @@ import re
 from typing import Any
 
 
-_FILE_NODE_TYPES = {
-    "n8n-nodes-base.convertToFile",
-    "n8n-nodes-base.compression",
-    "n8n-nodes-base.extractFromFile",
-}
-
-
 def node_version_info(node: dict[str, Any]) -> dict[str, Any] | None:
     """Вернуть fallback и пояснение, если версия узла не проверена.
 
@@ -27,6 +20,8 @@ def node_version_info(node: dict[str, Any]) -> dict[str, Any] | None:
     достоверно объявить версию неподдерживаемой, пока конвертер не задаёт
     проверенный диапазон.
     """
+    if "typeVersion" not in node:
+        return None
     kind = node.get("type")
     raw_version = node.get("typeVersion")
     numeric = (
@@ -86,16 +81,40 @@ def node_version_info(node: dict[str, Any]) -> dict[str, Any] | None:
         elif raw_version > 1.1:
             fallback = 1.1
     elif kind == "n8n-nodes-base.httpRequest":
-        if raw_version is not None and not numeric:
-            supported = "числовая версия (fallback: 4)"
+        supported = "4.0–4.5"
+        if not numeric:
+            fallback = 4.5
+        elif raw_version < 4:
             fallback = 4
+        elif raw_version > 4.5:
+            fallback = 4.5
     elif kind == "n8n-nodes-base.emailSend":
-        if raw_version is not None and not numeric:
-            supported = "числовая версия (fallback: 2.1)"
+        supported = "2.0–2.1"
+        if not numeric:
             fallback = 2.1
-    elif kind in _FILE_NODE_TYPES:
-        if raw_version is not None and not numeric:
-            supported = "числовая версия (fallback: 1)"
+        elif raw_version < 2:
+            fallback = 2
+        elif raw_version > 2.1:
+            fallback = 2.1
+    elif kind == "n8n-nodes-base.convertToFile":
+        supported = "1.0–1.2"
+        if not numeric:
+            fallback = 1.2
+        elif raw_version < 1:
+            fallback = 1
+        elif raw_version > 1.2:
+            fallback = 1.2
+    elif kind == "n8n-nodes-base.compression":
+        supported = "1.0–1.1"
+        if not numeric:
+            fallback = 1.1
+        elif raw_version < 1:
+            fallback = 1
+        elif raw_version > 1.1:
+            fallback = 1.1
+    elif kind == "n8n-nodes-base.extractFromFile":
+        supported = "1"
+        if not numeric or raw_version != 1:
             fallback = 1
 
     if fallback is None:
@@ -110,7 +129,12 @@ def node_version_info(node: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def compatible_node(node: dict[str, Any]) -> dict[str, Any]:
-    """Скопировать узел, подставив ближайшую известную версию конвертера."""
+    """Подготовить настройки узла для известной реализации конвертера.
+
+    Известные значения параметров сохраняются независимо от ``typeVersion``.
+    Для Loop неизвестные поля удаляются только из активных настроек и отдельно
+    фиксируются как ручные TODO, чтобы незнакомый параметр не блокировал проект.
+    """
     compatible = dict(node)
     info = node_version_info(node)
     if info is not None:
@@ -118,25 +142,25 @@ def compatible_node(node: dict[str, Any]) -> dict[str, Any]:
         if node.get("type") == "n8n-nodes-base.set":
             # Keep Set's original version so converters can distinguish legacy field selection.
             compatible["_n8nOriginalTypeVersion"] = node.get("typeVersion")
-        if node.get("type") == "n8n-nodes-base.splitInBatches":
-            original_parameters = node.get("parameters")
-            parameters = dict(original_parameters) if isinstance(original_parameters, dict) else {}
-            parameters = {
-                key: value
-                for key, value in parameters.items()
-                if key in {"batchSize", "options"}
-            }
-            batch_size = parameters.get("batchSize")
-            if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
-                parameters.pop("batchSize", None)
-            options = parameters.get("options", {})
-            if not isinstance(options, dict):
-                options = {}
-            options = {key: value for key, value in options.items() if key == "reset"}
-            if not isinstance(options.get("reset", False), bool):
-                options.pop("reset", None)
-            parameters["options"] = options
-            compatible["parameters"] = parameters
+    if node.get("type") == "n8n-nodes-base.splitInBatches":
+        original_parameters = node.get("parameters")
+        parameters = dict(original_parameters) if isinstance(original_parameters, dict) else {}
+        parameters = {
+            key: value
+            for key, value in parameters.items()
+            if key in {"batchSize", "options"}
+        }
+        batch_size = parameters.get("batchSize")
+        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
+            parameters.pop("batchSize", None)
+        options = parameters.get("options", {})
+        if not isinstance(options, dict):
+            options = {}
+        options = {key: value for key, value in options.items() if key == "reset"}
+        if not isinstance(options.get("reset", False), bool):
+            options.pop("reset", None)
+        parameters["options"] = options
+        compatible["parameters"] = parameters
     return compatible
 
 
@@ -230,25 +254,31 @@ def _removed_parameter_paths(original: Any, supported: Any, prefix: str = "param
     return []
 
 
-def manual_parameter_payload(node: dict[str, Any]) -> dict[str, Any]:
+def manual_parameter_payload(
+    node: dict[str, Any],
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
     """Подготовить безопасную подсказку, передаваемую generated-узлу.
 
     В payload сохраняются исходная и fallback-версии, форма настроек с
     ``None`` вместо значений и имена путей. Секреты не копируются в generated-код.
     """
     info = node_version_info(node)
-    if info is None:
-        return {}
-    original_version = info["actual"]
+    original_version = info["actual"] if info is not None else node.get("typeVersion")
     if isinstance(original_version, float) and not math.isfinite(original_version):
         original_version = repr(original_version)
     compatible_parameters = compatible_node(node).get("parameters", {})
     unsupported_paths = _removed_parameter_paths(
         node.get("parameters", {}), compatible_parameters
     )
+    if info is None and not unsupported_paths and not force:
+        return {}
+    if force and not unsupported_paths:
+        unsupported_paths = _parameter_paths(node.get("parameters", {}))
     return {
         "typeVersion": original_version,
-        "fallback_version": info["fallback"],
+        "fallback_version": info["fallback"] if info is not None else None,
         "parameters_template": _parameter_template(node.get("parameters", {})),
         "parameter_paths": tuple(_parameter_paths(node.get("parameters", {}))),
         "unsupported_parameter_paths": tuple(unsupported_paths),

@@ -10,7 +10,14 @@ import tomllib
 
 import pytest
 
-from n8n_transcriper.generator import generate_project
+from n8n_transcriper.generator import (
+    SUPPORTED_NODE_TYPES,
+    _MANUAL_FALLBACK_LAYOUTS,
+    _can_generate_manual_fallback,
+    generate_project,
+    node_conversion_issues,
+)
+from n8n_transcriper.reader import WorkflowError
 
 
 def test_generate_project_can_return_files_without_writing_them(tmp_path):
@@ -24,6 +31,31 @@ def test_generate_project_can_return_files_without_writing_them(tmp_path):
     assert "main.py" in files
     assert any(path.startswith("python_nodes/") for path in files)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_every_supported_node_type_has_a_manual_conversion_path():
+    assert SUPPORTED_NODE_TYPES - {"n8n-nodes-base.splitInBatches"} == set(
+        _MANUAL_FALLBACK_LAYOUTS
+    )
+
+
+@pytest.mark.parametrize("kind", sorted(SUPPORTED_NODE_TYPES))
+def test_unknown_settings_are_nonblocking_for_every_supported_node_type(kind):
+    node = {"type": kind, "parameters": {}}
+
+    assert _can_generate_manual_fallback(
+        node,
+        WorkflowError("Неподдерживаемые параметры: futureOption"),
+    )
+
+
+def test_unsupported_expression_can_use_manual_fallback():
+    node = {"type": "n8n-nodes-base.dataTable", "parameters": {}}
+
+    assert _can_generate_manual_fallback(
+        node,
+        WorkflowError("Не найдено выражение в expression узла"),
+    )
 
 
 def test_generated_pyproject_declares_only_required_dependencies(tmp_path):
@@ -105,17 +137,24 @@ def test_generated_main_writes_info_logs_to_stdout_and_includes_platform_launche
         subprocess.run(["sh", "-n", str(output / "run.sh")], check=True)
 
 
-def test_unsupported_node_is_omitted_with_a_diagnostic(tmp_path):
+def test_unknown_setting_is_generated_as_manual_todo_not_omitted(tmp_path):
     output = tmp_path / "generated"
     workflow = {"nodes": [{
         "id": "http", "name": "HTTP", "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 9,
         "parameters": {"url": "https://example.com", "unsupportedOption": True},
     }], "connections": {}}
+    warnings = []
+    assert node_conversion_issues(workflow, manual_fallback_warnings=warnings) == []
+    assert any("unsupportedOption" in message for _, message in warnings)
+
     files = generate_project(workflow, output)
     assert (output / "main.py").exists()
     assert "HTTP" in files["main.py"]
     assert "unsupportedOption" in files["main.py"]
-    assert "http_requests/" not in "\n".join(files)
+    assert "http_requests/" in "\n".join(files)
+    assert "NotImplementedError" in files["http_requests/http.py"]
+    assert "TODO-заготовка" in files["README.md"]
 
 
 def test_generated_set_reads_previous_node(tmp_path):
