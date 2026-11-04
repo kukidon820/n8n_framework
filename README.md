@@ -1,116 +1,107 @@
 # n8n-transcriper
 
-Конвертер экспортированных n8n workflow в самостоятельные Python-проекты. Он разбирает граф и expressions при генерации, а в `generated/main.py` записывает обычные вызовы функций и ветвления. Для запуска результата n8n и исходный JSON не нужны.
+Конвертер экспортированных workflow из n8n в самостоятельные Python-проекты. Он читает JSON только при генерации, анализирует связи и expressions, затем создаёт обычные функции и явный порядок вызовов в <code>main.py</code>. Исходный workflow и n8n для запуска результата не нужны.
 
-Конвертер ориентирован на понятный сгенерированный код и поддерживаемые типы узлов. Если встречается неизвестная операция, настройка или неоднозначное выражение, генерация завершается диагностикой вместо тихой подмены поведения.
+Для обычных шагов создаётся отдельный Python-модуль. Ветвления, циклы и объединения преобразуются в видимый Python-код. Конвертер не запускает триггеры и не создаёт runtime-интерпретатор n8n.
 
-## Быстрый запуск
+## Установка
 
-Требуются Python 3.12+ и [uv](https://docs.astral.sh/uv/). Файл `.python-version` выбирает Python 3.12 для команд uv.
+Нужны Python 3.12 или новее и <code>uv</code>. В корне репозитория выполните:
 
-```bash
-uv sync
-uv run python convert.py workflow.json --out generated
-```
-
-Каталог `generated` должен отсутствовать или быть пустым. В нём появятся `main.py`, `config.py`, `pyproject.toml`, `.python-version`, `uv.lock`, `requirements.txt`, `run.bat`, `run.sh`, `README.md`, `conversion_report.md` и модули для используемых узлов. При конвертации uv разрешит зависимости и создаст lock-файл.
+    uv sync
 
 ## Команды
 
-Посмотреть команды:
+Показать справку:
 
-```bash
-uv run n8n-transcriper --help
-```
+    uv run n8n-transcriper --help
 
-Преобразовать workflow:
+Проверить структуру workflow и вывести его узлы:
 
-```bash
-uv run n8n-transcriper convert workflow.json --out generated
-```
+    uv run n8n-transcriper inspect workflow.json
 
-Проверить файл и вывести узлы:
+Проверить workflow, поддержку узлов и выражений, а также сгенерированный Python-код без записи проекта:
 
-```bash
-uv run n8n-transcriper inspect workflow.json
-```
+    uv run n8n-transcriper validate workflow.json
 
-Подробно проверить структуру, соединения, поддержку узлов, expressions и синтаксис сгенерированного Python без сохранения файлов:
+Создать проект:
 
-```bash
-uv run n8n-transcriper validate workflow.json
-```
+    uv run n8n-transcriper convert workflow.json --out generated
 
-Короткая команда `uv run python convert.py workflow.json --out generated` эквивалентна команде `convert`.
+В качестве короткой команды преобразования также доступно:
 
-## Запуск сгенерированного проекта
+    uv run python convert.py workflow.json --out generated
 
-Перейдите в каталог результата и установите точные версии из lock-файла:
+Каталог назначения должен отсутствовать или быть пустым. Конвертер создаст в нём только файлы и зависимости, нужные этому workflow: <code>main.py</code>, <code>config.py</code>, <code>pyproject.toml</code>, <code>uv.lock</code>, <code>requirements.txt</code>, README, отчёт и модули узлов.
 
-```bash
-cd generated
-uv sync --locked
-uv run python main.py
-```
+## Запуск созданного проекта
 
-Для запуска через обёртку используйте `run.bat` на Windows или `sh run.sh` на Linux/macOS. В интерактивном терминале оба скрипта ждут подтверждения после выполнения, чтобы оставить логи на экране. Логирование workflow работает через стандартный вывод на обеих платформах.
+Перейдите в каталог результата, установите зафиксированные зависимости и запустите workflow:
 
-Триггеры n8n не запускаются. Если workflow ожидает входные данные, передайте items вручную:
+    cd generated
+    uv sync --locked
+    uv run python main.py
 
-```python
-from main import run
+Для запуска через скрипт используйте <code>run.bat</code> на Windows или <code>sh run.sh</code> на Linux/macOS. Если workflow ожидает входные данные, передайте их в <code>run()</code> вручную:
 
-result = run([{"json": {"name": "Пример"}}])
-```
+    from main import run
 
-Без аргумента `run()` получает один пустой item `{"json": {}}`. Исходный workflow JSON после генерации не требуется.
+    result = run([{"json": {"name": "Пример"}}])
 
-## Credentials
+Если аргумент не передан, точка входа получает один пустой item. Элементы имеют n8n-подобную форму: <code>{"json": {...}, "binary": {...}}</code>. Бинарные файлы представлены байтами.
 
-`config.py` перечисляет переменные окружения, которые использует сгенерированный проект. Перед запуском задайте значения в терминале или в окружении процесса. Файл `.env` автоматически не загружается.
+В async-приложении используйте <code>await run_async(input_data)</code> из <code>main.py</code>. Каждый сгенерированный узел — async-функция; HTTP, SMTP и PostgreSQL используют асинхронные клиенты.
 
-```powershell
-$env:OPENROUTER_CHAT_MODEL_API_KEY = "..."
-$env:SMTP_USERNAME = "your-account@gmail.com"
-$env:SMTP_APP_PASSWORD = "пароль-приложения"
-```
+## Частичная конвертация
 
-```bash
-export OPENROUTER_CHAT_MODEL_API_KEY="..."
-export SMTP_USERNAME="your-account@gmail.com"
-export SMTP_APP_PASSWORD="app-password"
-```
+Когда узел, операция, параметр, expression или соединение не поддерживается, конвертер записывает причину в комментарии <code>main.py</code>, в generated README и в <code>conversion_report.md</code>, пропускает непереводимую часть и продолжает генерацию остальной программы. Соединения через пропущенные узлы упрощаются. Из-за этого оставшиеся узлы могут получить не те данные, которые получали в n8n: перед запуском проверьте все пометки и вручную восстановите нужную логику.
 
-Заполняйте только переменные, перечисленные в `generated/config.py`. Не добавляйте реальные ключи и пароли в Git.
+Команда <code>validate</code> помогает увидеть проблемы до запуска конвертации. Неправильный JSON и ошибки, которые нельзя локализовать до отдельной части workflow, могут помешать проверке. Полный список поддерживаемых операций и настроек приведён в [справочнике узлов](docs/supported-nodes.md).
+
+## Credentials и переменные окружения
+
+Сгенерированный <code>config.py</code> показывает, какие секреты и настройки необходимы этому проекту. Значения из credentials n8n не переносятся в Python-код. Установите переменные, которые перечислены в сгенерированном конфиге.
+
+PowerShell:
+
+    $env:OPENROUTER_CHAT_MODEL_API_KEY = "ваш-ключ"
+    $env:SMTP_USERNAME = "your-account@gmail.com"
+    $env:SMTP_APP_PASSWORD = "пароль-приложения"
+
+Linux/macOS:
+
+    export OPENROUTER_CHAT_MODEL_API_KEY="ваш-ключ"
+    export SMTP_USERNAME="your-account@gmail.com"
+    export SMTP_APP_PASSWORD="пароль-приложения"
+
+Файл <code>.env</code> сам по себе не загружается. Точные имена переменных смотрите в generated <code>config.py</code>; примеры выше могут отличаться от вашего workflow. Не записывайте реальные ключи и пароли в репозиторий.
 
 ## Поддерживаемые узлы
 
 | Узел | Реализация |
 |---|---|
-| Python Code | Исходный Python-код переносится в функцию; поддерживаются режимы «все items» и «каждый item» |
-| HTTP Request | Отдельная функция для каждого узла, базовые методы, тела запросов, заголовки, параметры, credentials, таймауты, повторы и форматы ответов |
-| Отправка в Gmail API `users/me/messages/send` | SMTP через `smtp.gmail.com:587` с STARTTLS и паролем приложения; остальные Gmail API запросы используют OAuth2 |
-| Convert to File, Compression, Extract From File | Текстовые файлы, ZIP, распаковка, извлечение текста и base64 |
-| Edit Fields (Set) | Присваивания, типы значений, выбор сохраняемых полей и ссылки на предыдущие узлы |
-| IF и Switch | Условия, правила маршрутизации, fallback и несколько совпавших выходов |
-| Merge | Только режимы Append и Combine; варианты Combine включают сопоставление по полям, позициям и все пары |
-| AI Agent + chat-модель | Обычный HTTP-вызов к OpenAI-compatible Chat Completions API для агента без подключённых инструментов; URL, ключ и параметры модели находятся в `config.py` |
-| PostgreSQL | `executeQuery` с параметрами; SELECT/INSERT/UPDATE/DELETE и транзакционная пакетная обработка |
+| Python Code | Перенос исходного Python-кода в функцию; запуск для всех items или каждого item |
+| HTTP Request | Отдельный HTTP-вызов с настройками запроса, ответа, авторизации, retry, batching и ограниченной пагинацией |
+| Send Email | Создание MIME-письма и отправка через SMTP |
+| Convert to File | CSV, HTML, iCal, JSON, ODS, RTF, текст, XLS, XLSX и binary |
+| Compression | ZIP-архивирование и распаковка с bytes |
+| Extract From File | Чтение текста из binary или преобразование binary в base64 |
+| Edit Fields (Set) | Assignments, выбор исходных полей, binary и обработка ошибок приведения типов |
+| No Operation | Передача входных items без изменений |
+| IF и Switch | Маршрутизация items по условиям |
+| Merge | Только Append и Combine |
+| Loop Over Items | Класс <code>Loop</code> с размером пакета, reset, Execute Once и Retry On Fail |
+| Wait | Асинхронная пауза по интервалу или до заданной даты; webhook/form пропускаются с диагностикой |
+| AI Agent | HTTP-вызов подключённой модели через OpenAI-compatible Chat Completions API; tools и streaming не поддерживаются |
+| Data Table | Операции со строками PostgreSQL через asyncpg |
+| PostgreSQL | Простые SQL-запросы через psycopg |
 
-Триггеры пропускаются. Описание реализованных параметров и ограничений приведено в [таблице поддержки](docs/supported-nodes.md).
-
-## Expressions и передача данных
-
-Конвертер преобразует поддерживаемые ссылки на текущие и именованные items, включая `$json`, `$binary`, `$input`, `$('Имя узла').first()`, `.all()` и связанные `.item`. Простые логические выражения, сравнения, шаблоны и `JSON.stringify` компилируются в Python при генерации.
-
-Функции обмениваются n8n-подобными items: `{"json": {...}, "binary": {...}}`. Бинарные данные остаются байтами. Для ссылок `.item` генератор сохраняет связь элементов через IF, Switch и Merge; неоднозначное соответствие вызывает ошибку при выполнении, а не выбирает случайный item.
+Справочник [описывает поддерживаемые параметры и ограничения каждого узла](docs/supported-nodes.md). В [обзоре архитектуры](docs/architecture.md) объяснено устройство generated-проекта. Команды установки и разработки приведены в [руководстве разработчика](docs/development.md).
 
 ## Проверки и разработка
 
-Запустить тесты без реальных API:
+Запуск unit-тестов:
 
-```bash
-uv run pytest
-```
+    uv run pytest
 
-Тест PostgreSQL integration требует доступный тестовый сервер и `N8N_TEST_POSTGRES_PORT`. Подробные команды и структура проекта описаны в [руководстве разработчика](docs/development.md) и [обзоре архитектуры](docs/architecture.md).
+Интеграционная проверка PostgreSQL пропускается, если не задан порт тестового сервера. Условия запуска описаны в [руководстве разработчика](docs/development.md).
