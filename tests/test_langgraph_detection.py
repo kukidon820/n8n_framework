@@ -109,6 +109,36 @@ def test_known_gemini_endpoint_uses_contents_shape():
     )
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"model": "gemini-3.8-flash", "input": "Summarize this"},
+        {"agent": "deep-research-preview-04-2026", "input": "Research this"},
+    ],
+)
+def test_gemini_interactions_endpoint_detects_models_and_managed_agents(body):
+    result = detect_ai_request(
+        _request("https://generativelanguage.googleapis.com/v1/interactions", body)
+    )
+
+    assert (result.is_ai, result.provider, result.operation) == (
+        True,
+        "gemini",
+        "interactions",
+    )
+
+
+def test_gemini_interactions_endpoint_requires_model_or_agent_input():
+    result = detect_ai_request(
+        _request(
+            "https://generativelanguage.googleapis.com/v1/interactions",
+            {"model": "gemini-3.8-flash"},
+        )
+    )
+
+    assert result.is_ai is False
+
+
 def test_custom_url_uses_full_body_signature_instead_of_domain():
     result = detect_ai_request(
         _request(
