@@ -359,6 +359,8 @@ def node_conversion_issues(
 def _prepare_partial_workflow(
     workflow: dict[str, Any],
     forced_skips: dict[str, str] | None = None,
+    *,
+    langgraph: bool = False,
 ) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
     """Исключить непереводимые узлы, соединить их соседей и вернуть причины пропуска.
 
@@ -382,7 +384,10 @@ def _prepare_partial_workflow(
     for name, reason in (forced_skips or {}).items():
         skip(name, reason)
 
-    for name, reason in node_conversion_issues(workflow):
+    issue_workflow = (
+        _prepare_langgraph_conversion_input(workflow) if langgraph else workflow
+    )
+    for name, reason in node_conversion_issues(issue_workflow):
         if name is not None:
             skip(name, reason)
 
@@ -1842,13 +1847,20 @@ def generate_project(
         raise WorkflowError("Workflow не содержит узлов")
 
     forced_skips: dict[str, str] = {}
-    candidate, skipped_parts = _prepare_partial_workflow(original, forced_skips)
+    candidate, skipped_parts = _prepare_partial_workflow(
+        original, forced_skips, langgraph=langgraph
+    )
     files: dict[str, str] | None = None
     last_error: str | None = None
 
     while candidate.get("nodes"):
         try:
-            files = _generate_supported_project(candidate)
+            conversion_input = (
+                _prepare_langgraph_conversion_input(candidate)
+                if langgraph
+                else candidate
+            )
+            files = _generate_supported_project(conversion_input)
             if langgraph:
                 files = _apply_langgraph_mode(candidate, files)
             break
@@ -1857,7 +1869,9 @@ def generate_project(
             culprit = _node_named_in_error(candidate, last_error)
             if culprit is not None and culprit not in forced_skips:
                 forced_skips[culprit] = f"Ошибка конвертации узла: {last_error}"
-                candidate, skipped_parts = _prepare_partial_workflow(original, forced_skips)
+                candidate, skipped_parts = _prepare_partial_workflow(
+                    original, forced_skips, langgraph=langgraph
+                )
                 continue
 
             # A graph-level diagnostic may not identify its source node.
@@ -1872,11 +1886,18 @@ def generate_project(
                 trial_skips[name] = (
                     f"Общая схема workflow не собралась ({last_error}); узел пропущен."
                 )
-                trial, trial_notes = _prepare_partial_workflow(original, trial_skips)
+                trial, trial_notes = _prepare_partial_workflow(
+                    original, trial_skips, langgraph=langgraph
+                )
                 if not trial.get("nodes"):
                     continue
                 try:
-                    trial_files = _generate_supported_project(trial)
+                    conversion_input = (
+                        _prepare_langgraph_conversion_input(trial)
+                        if langgraph
+                        else trial
+                    )
+                    trial_files = _generate_supported_project(conversion_input)
                     if langgraph:
                         trial_files = _apply_langgraph_mode(trial, trial_files)
                 except Exception:
@@ -1895,7 +1916,9 @@ def generate_project(
                         node["name"],
                         f"Граф workflow не удалось собрать ({last_error}); узел не включён в проект.",
                     )
-            candidate, skipped_parts = _prepare_partial_workflow(original, forced_skips)
+            candidate, skipped_parts = _prepare_partial_workflow(
+                original, forced_skips, langgraph=langgraph
+            )
             break
 
     if files is None:
@@ -1908,10 +1931,72 @@ def generate_project(
     return files
 
 
+def _prepare_langgraph_conversion_input(workflow: dict[str, Any]) -> dict[str, Any]:
+    """Temporarily simplify detected AI HTTP settings for legacy validation.
+
+    The ordinary HTTP generator remains responsible for the rest of the
+    workflow, but it must not reject an AI node because its JSON expression is
+    newer than the default converter's expression subset. The original node is
+    passed to the LangGraph agent generator immediately after this pass.
+    """
+    from n8n_transcriper.langgraph_mode.detection import detect_ai_request
+
+    candidate = copy.deepcopy(workflow)
+    original_nodes = {
+        node.get("name"): node
+        for node in workflow.get("nodes", [])
+        if isinstance(node, dict)
+    }
+    for node in candidate.get("nodes", []):
+        original = original_nodes.get(node.get("name"))
+        if not isinstance(original, dict) or not detect_ai_request(original).is_ai:
+            continue
+        source_parameters = original.get("parameters", {})
+        parameters = {
+            "method": "POST",
+            "url": source_parameters.get("url", ""),
+            "sendBody": True,
+            "contentType": "json",
+            "specifyBody": "json",
+            "jsonBody": (
+                '{"model":"langgraph-validation",'
+                '"messages":[{"role":"user","content":"validation"}],'
+                '"temperature":0}'
+            ),
+            "options": {},
+        }
+        for key in ("authentication", "genericAuthType"):
+            if key in source_parameters:
+                parameters[key] = copy.deepcopy(source_parameters[key])
+        headers = source_parameters.get("headerParameters", {})
+        entries = headers.get("parameters", []) if isinstance(headers, dict) else []
+        if isinstance(entries, list) and entries:
+            safe_entries = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                safe_entry = copy.deepcopy(entry)
+                value = safe_entry.get("value")
+                if isinstance(value, str) and (value.startswith("=") or "{{" in value):
+                    safe_entry["value"] = ""
+                safe_entries.append(safe_entry)
+            parameters["sendHeaders"] = True
+            parameters["headerParameters"] = {"parameters": safe_entries}
+        node["parameters"] = parameters
+        # The provider-backed adapter applies these retry settings itself.
+        node["retryOnFail"] = False
+    return candidate
+
+
 def _apply_langgraph_mode(
     workflow: dict[str, Any], files: dict[str, str]
 ) -> dict[str, str]:
     """Add the opt-in LangGraph runner without changing default generation."""
+    from n8n_transcriper.langgraph_mode.agent_generation import (
+        generate_http_agent_node,
+        generate_n8n_agent_node,
+    )
+    from n8n_transcriper.langgraph_mode.detection import detect_ai_request
     from n8n_transcriper.langgraph_mode.renderer import render_langgraph_main
 
     main_source = files.get("main.py")
@@ -1922,6 +2007,7 @@ def _apply_langgraph_mode(
         for node in workflow.get("nodes", [])
         if isinstance(node, dict) and isinstance(node.get("name"), str)
     }
+    module_names = _module_names(node_map)
     edges = connections(workflow)
     model_names = {
         edge.source
@@ -1939,10 +2025,66 @@ def _apply_langgraph_mode(
     loop_info = _loop_layout(
         node_map, main_nodes, all_main_edges, base_order, feedback_edges
     )
+    model_sources = {
+        edge.target: edge.source
+        for edge in edges
+        if edge.channel == "ai_languageModel"
+        and edge.target in node_map
+        and node_map[edge.target].get("type") == "@n8n/n8n-nodes-langchain.agent"
+    }
+    agent_nodes: set[str] = set()
+    ai_providers: set[str] = set()
+    config_additions: list[str] = []
+    ai_dependencies: set[str] = set()
+    for name, node in node_map.items():
+        if node.get("type") == "n8n-nodes-base.httpRequest":
+            detection = detect_ai_request(node)
+            if not detection.is_ai:
+                continue
+            source, config_block, _ = generate_http_agent_node(
+                node, detection, module_names[name]
+            )
+            files.pop(f"http_requests/{module_names[name]}.py", None)
+            files[f"ai_nodes/{module_names[name]}.py"] = source
+            files["ai_nodes/__init__.py"] = ""
+            config_additions.append(config_block)
+            agent_nodes.add(name)
+            ai_providers.add(detection.provider or "openai_compatible")
+            if detection.provider == "gemini" and detection.operation == "interactions":
+                ai_dependencies.add("google-genai>=2.3.0")
+            elif detection.provider == "openai_compatible" and detection.endpoint is None:
+                ai_dependencies.update({"langchain>=1.0", "httpx>=0.27"})
+            else:
+                ai_dependencies.update({
+                    "langchain>=1.0",
+                    "langchain-" + _langchain_package(detection.provider),
+                })
+        elif node.get("type") == "@n8n/n8n-nodes-langchain.agent":
+            model_name = model_sources.get(name)
+            if model_name not in node_map:
+                continue
+            source, _, dependency = generate_n8n_agent_node(
+                node,
+                node_map[model_name],
+                module_names[name],
+                module_names[model_name].upper(),
+            )
+            files[f"ai_nodes/{module_names[name]}.py"] = source
+            agent_nodes.add(name)
+            ai_dependencies.update({"langchain>=1.0", dependency})
+            ai_providers.add(_langchain_provider_for_model(node_map[model_name]))
+    if config_additions:
+        files["config.py"] = files.get("config.py", "import os\n") + "".join(config_additions)
+    if not any(
+        path.startswith("http_requests/") and path != "http_requests/__init__.py"
+        for path in files
+    ):
+        files.pop("http_requests/__init__.py", None)
     files["main.py"] = render_langgraph_main(
         workflow,
-        _module_names(node_map),
+        module_names,
         loop_info=loop_info,
+        agent_nodes=agent_nodes,
     )
 
     dependencies = {
@@ -1951,6 +2093,13 @@ def _apply_langgraph_mode(
         if line.strip()
     }
     dependencies.add("langgraph>=1.0")
+    dependencies.update(ai_dependencies)
+    if not any(
+        re.search(r"^\s*(?:import\s+httpx|from\s+httpx\s+import)\b", source, re.MULTILINE)
+        for path, source in files.items()
+        if path.endswith(".py")
+    ):
+        dependencies.discard("httpx>=0.27")
     files["requirements.txt"] = "".join(
         f"{dependency}\n" for dependency in sorted(dependencies)
     )
@@ -1963,4 +2112,40 @@ def _apply_langgraph_mode(
         + "\u041a\u0430\u0436\u0434\u044b\u0439 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u044b\u0439 \u0443\u0437\u0435\u043b \u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0441\u044f \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u043c \u0448\u0430\u0433\u043e\u043c \u0433\u0440\u0430\u0444\u0430. \u0422\u0435\u043b\u043e `Loop Over Items` "
         + "\u0441\u043e\u0437\u0434\u0430\u0451\u0442\u0441\u044f \u043a\u0430\u043a \u0432\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0439 \u0433\u0440\u0430\u0444, \u0430 \u0443\u0437\u043b\u044b \u0434\u043e \u0438 \u043f\u043e\u0441\u043b\u0435 \u0446\u0438\u043a\u043b\u0430 \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u0448\u0430\u0433\u0430\u043c\u0438 \u043e\u0441\u043d\u043e\u0432\u043d\u043e\u0433\u043e \u0433\u0440\u0430\u0444\u0430.\n"
     )
+    if ai_providers:
+        provider_names = ", ".join(f"`{provider}`" for provider in sorted(ai_providers))
+        files["README.md"] += (
+            "\n### AI-\u0443\u0437\u043b\u044b \u0432 LangGraph\n\n"
+            "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 HTTP-\u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432 \u043d\u0430 AI \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0440\u0438 `--langgraph`. \u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440 \u0443\u0447\u0438\u0442\u044b\u0432\u0430\u0435\u0442 host/endpoint \u0438 \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0443 JSON body; \u043e\u0434\u043d\u043e\u0433\u043e \u043f\u043e\u043b\u044f `messages` \u0431\u0435\u0437 \u043c\u043e\u0434\u0435\u043b\u0438, \u0440\u043e\u043b\u0435\u0439 \u0438 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438 \u043d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e.\n\n"
+            "\u0418\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0435 endpoint-\u0444\u043e\u0440\u043c\u044b: OpenAI/DeepSeek `/v1/chat/completions`, OpenRouter `/api/v1/chat/completions`, Anthropic `/v1/messages`, Gemini `:generateContent` \u0438 `/v1/interactions`, Ollama `/api/chat` \u0438 `/api/generate`. \u0414\u043b\u044f \u0441\u0432\u043e\u0438\u0445 URL \u043d\u0443\u0436\u0435\u043d\u0430 \u043f\u043e\u043b\u043d\u0430\u044f \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0430 \u043c\u043e\u0434\u0435\u043b\u0438, role-based messages \u0438 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438.\n\n"
+            "Для внутренних endpoint с распознанной OpenAI-compatible структурой используется точный URL узла (без секретных query-параметров); ответ API должен содержать choices[0].message.content.\n\n"
+            f"\u0412 \u044d\u0442\u043e\u043c workflow \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u044b \u043f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440\u044b: {provider_names}.\n\n"
+            "\u041e\u0431\u044b\u0447\u043d\u044b\u0435 HTTP AI-\u0437\u0430\u043f\u0440\u043e\u0441\u044b \u0438 n8n AI Agent \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u044e\u0442\u0441\u044f \u0447\u0435\u0440\u0435\u0437 `create_agent` \u0438 provider ChatModel. Gemini Interactions API \u0432\u044b\u0437\u044b\u0432\u0430\u0435\u0442\u0441\u044f \u0430\u0441\u0438\u043d\u0445\u0440\u043e\u043d\u043d\u044b\u043c Google GenAI SDK, \u0447\u0442\u043e\u0431\u044b \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u0443\u0434\u0430\u043b\u0451\u043d\u043d\u043e\u0433\u043e \u0430\u0433\u0435\u043d\u0442\u0430. \u0421\u0435\u043a\u0440\u0435\u0442\u044b \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u0432 `config.py`/env.\n"
+        )
     return files
+
+
+def _langchain_package(provider: str | None) -> str:
+    """Return the provider package name without the shared ``langchain-`` prefix."""
+    packages = {
+        "openai": "openai",
+        "deepseek": "openai",
+        "openrouter": "openai",
+        "openai_compatible": "openai",
+        "anthropic": "anthropic",
+        "gemini": "google-genai",
+        "gemini_compatible": "google-genai",
+        "ollama": "ollama",
+    }
+    if provider not in packages:
+        raise WorkflowError(f"Неизвестный AI-провайдер LangGraph: {provider}")
+    return packages[provider]
+
+
+def _langchain_provider_for_model(node: dict[str, Any]) -> str:
+    """Name the provider implied by an n8n chat-model node type."""
+    kind = str(node.get("type", "")).casefold()
+    for provider in ("openrouter", "deepseek", "anthropic", "gemini", "google", "ollama", "openai"):
+        if provider in kind:
+            return "gemini" if provider == "google" else provider
+    return "openai_compatible"

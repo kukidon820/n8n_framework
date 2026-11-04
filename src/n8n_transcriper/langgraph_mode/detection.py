@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from n8n_transcriper.expressions import compile_expression
+from n8n_transcriper.langgraph_mode.expressions import compile_langgraph_expression
 from n8n_transcriper.langgraph_mode.providers import (
     ProviderEndpoint,
     match_provider_endpoint,
@@ -93,7 +93,9 @@ def _expression_body(value: str, node_name: str) -> Any:
         return parsed_json
 
     try:
-        expression = compile_expression(value, node=node_name, parameter="jsonBody")
+        expression = compile_langgraph_expression(
+            value, node=node_name, parameter="jsonBody"
+        )
         tree = ast.parse(expression.code, mode="eval")
     except (SyntaxError, ValueError, TypeError, WorkflowError):
         return _UNKNOWN
@@ -152,7 +154,7 @@ def _has_text_contents(body: dict[str, Any]) -> bool:
             continue
         parts = content.get("parts")
         if isinstance(parts, list) and any(
-            isinstance(part, dict) and isinstance(part.get("text"), str)
+            isinstance(part, dict) and "text" in part
             for part in parts
         ):
             return True
@@ -173,7 +175,7 @@ def _body_shape(body: Any) -> _BodyShape:
         fields=fields,
         has_role_messages=_has_role_messages(body),
         has_text_contents=_has_text_contents(body),
-        has_prompt=isinstance(body.get("prompt"), (str, dict, list)),
+        has_prompt="prompt" in body,
         has_generation_options=has_options,
     )
 
@@ -208,6 +210,10 @@ def detect_ai_request(node: dict[str, Any]) -> AiRequestDetection:
     method = parameters.get("method", "GET")
     if not isinstance(method, str) or method.upper() != "POST":
         return AiRequestDetection(False, None, None, "none", ())
+    if parameters.get("sendBody", True) is False:
+        return AiRequestDetection(False, None, None, "none", ())
+    if parameters.get("contentType", "json") not in {"json", "application/json"}:
+        return AiRequestDetection(False, None, None, "none", ())
     url = parameters.get("url")
     if not isinstance(url, str):
         return AiRequestDetection(False, None, None, "none", ())
@@ -230,7 +236,18 @@ def detect_ai_request(node: dict[str, Any]) -> AiRequestDetection:
         elif endpoint.operation == "generate_content":
             compatible_body = shape.has_text_contents or chat_shape
         elif endpoint.operation == "interactions":
-            compatible_body = model_present or "input" in shape.fields or chat_shape
+            compatible_body = (
+                ("agent" in shape.fields and "input" in shape.fields)
+                or (
+                    model_present
+                    and (
+                        "input" in shape.fields
+                        or chat_shape
+                        or shape.has_prompt
+                        or shape.has_text_contents
+                    )
+                )
+            )
         elif endpoint.operation == "generate":
             compatible_body = model_present and shape.has_prompt
         else:
