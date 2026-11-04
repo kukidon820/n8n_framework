@@ -100,10 +100,11 @@ def test_default_mode_keeps_ai_http_node_as_ordinary_http_request():
     assert "langchain" not in files["requirements.txt"]
 
 
-def test_langgraph_mode_generates_provider_agent_from_internal_chat_body(
+def test_langgraph_mode_generates_provider_agent_from_openai_chat_body(
     monkeypatch,
 ):
     node = _http_node(
+        url="https://api.openai.com/v1/chat/completions",
         body=(
             "={{ {model: 'private-model', messages: "
             "[{role: 'system', content: 'Be concise'}, "
@@ -155,6 +156,196 @@ def test_langgraph_mode_generates_provider_agent_from_internal_chat_body(
     assert model_kwargs["temperature"] == 0.7
     assert model_kwargs["max_tokens"] == 2000
     assert "model_kwargs" not in model_kwargs
+
+
+def test_internal_ai_endpoint_preserves_exact_url_and_request_options(
+    monkeypatch,
+):
+    secret = "CUSTOM_ENDPOINT_API_KEY_MUST_NOT_LEAK"
+    node = _http_node(
+        url=(
+            "https://internal.example/api/run?tenant=finance"
+            f"&api_key={secret}"
+        ),
+        body={
+            "model": "private-model",
+            "messages": [
+                {"role": "user", "content": "={{ $json.prompt }}"}
+            ],
+            "temperature": 0.4,
+            "max_tokens": 900,
+        },
+    )
+    files = generate_project({"nodes": [node], "connections": {}}, langgraph=True)
+    source = files["ai_nodes/llm_request.py"]
+
+    assert "class WorkflowEndpointChatModel" in source
+    assert "endpoint=config.LANGGRAPH_HTTP_LLM_REQUEST_ENDPOINT_URL" in source
+    assert "https://internal.example/api/run?tenant=finance" in files["config.py"]
+    assert secret not in "\n".join(files.values())
+    assert "langchain>=1.0" in files["requirements.txt"]
+    assert "httpx>=0.27" in files["requirements.txt"]
+    assert "langchain-openai" not in files["requirements.txt"]
+    assert "choices[0].message.content" in files["README.md"]
+    for path, content in files.items():
+        if path.endswith(".py"):
+            compile(content, path, "exec")
+
+    captured: dict[str, object] = {}
+
+    class FakeMessage:
+        def __init__(self, content, tool_call_id=None):
+            self.content = content
+            self.tool_call_id = tool_call_id
+
+    class FakeAIMessage(FakeMessage):
+        pass
+
+    class FakeHumanMessage(FakeMessage):
+        pass
+
+    class FakeSystemMessage(FakeMessage):
+        pass
+
+    class FakeToolMessage(FakeMessage):
+        pass
+
+    class FakeBaseChatModel:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeChatGeneration:
+        def __init__(self, message):
+            self.message = message
+
+    class FakeChatResult:
+        def __init__(self, generations):
+            self.generations = generations
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "choices": [
+                    {"message": {"role": "assistant", "content": "custom answer"}}
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["timeout"] = kwargs["timeout"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["body"] = json
+            return FakeResponse()
+
+    core = types.ModuleType("langchain_core")
+    core.__path__ = []
+    language_models = types.ModuleType("langchain_core.language_models")
+    language_models.__path__ = []
+    chat_models = types.ModuleType("langchain_core.language_models.chat_models")
+    chat_models.BaseChatModel = FakeBaseChatModel
+    messages_module = types.ModuleType("langchain_core.messages")
+    messages_module.AIMessage = FakeAIMessage
+    messages_module.BaseMessage = FakeMessage
+    messages_module.HumanMessage = FakeHumanMessage
+    messages_module.SystemMessage = FakeSystemMessage
+    messages_module.ToolMessage = FakeToolMessage
+    outputs = types.ModuleType("langchain_core.outputs")
+    outputs.ChatGeneration = FakeChatGeneration
+    outputs.ChatResult = FakeChatResult
+    httpx = types.ModuleType("httpx")
+    httpx.AsyncClient = FakeAsyncClient
+
+    def create_agent(*, model, tools):
+        assert tools == []
+
+        class FakeAgent:
+            async def ainvoke(self, state):
+                messages = []
+                for entry in state["messages"]:
+                    message_class = {
+                        "system": FakeSystemMessage,
+                        "user": FakeHumanMessage,
+                        "assistant": FakeAIMessage,
+                        "tool": FakeToolMessage,
+                    }[entry["role"]]
+                    messages.append(
+                        message_class(
+                            entry["content"], entry.get("tool_call_id")
+                        )
+                    )
+                generated = await model._agenerate(messages)
+                return {
+                    "messages": state["messages"]
+                    + [generated.generations[0].message]
+                }
+
+        return FakeAgent()
+
+    agents = types.ModuleType("langchain.agents")
+    agents.create_agent = create_agent
+    langchain = types.ModuleType("langchain")
+    langchain.__path__ = []
+    config = types.ModuleType("config")
+    config.LANGGRAPH_HTTP_LLM_REQUEST_ENDPOINT_URL = (
+        "https://internal.example/api/run?tenant=finance"
+    )
+    config.LANGGRAPH_HTTP_LLM_REQUEST_API_KEY = ""
+    config.LANGGRAPH_HTTP_LLM_REQUEST_API_KEY_HEADER = "Authorization"
+    config.LANGGRAPH_HTTP_LLM_REQUEST_API_KEY_PREFIX = "Bearer "
+    for name, module in {
+        "langchain": langchain,
+        "langchain.agents": agents,
+        "langchain_core": core,
+        "langchain_core.language_models": language_models,
+        "langchain_core.language_models.chat_models": chat_models,
+        "langchain_core.messages": messages_module,
+        "langchain_core.outputs": outputs,
+        "httpx": httpx,
+        "config": config,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    generated_module = types.ModuleType("generated_custom_ai_node")
+    exec(compile(source, "generated_custom_ai_node.py", "exec"), generated_module.__dict__)
+    result = asyncio.run(
+        generated_module.run_node(
+            [{"json": {"prompt": "Keep this exact endpoint"}}],
+            {},
+            {"id": "execution-custom"},
+        )
+    )
+
+    assert captured["url"] == "https://internal.example/api/run?tenant=finance"
+    assert captured["body"] == {
+        "temperature": 0.4,
+        "max_tokens": 900,
+        "model": "private-model",
+        "messages": [
+            {"role": "user", "content": "Keep this exact endpoint"}
+        ],
+    }
+    assert result == [
+        {
+            "json": {
+                "choices": [
+                    {"message": {"role": "assistant", "content": "custom answer"}}
+                ],
+                "model": "private-model",
+            }
+        }
+    ]
 
 
 def test_gemini_generation_config_and_ollama_options_reach_model_constructor(
