@@ -90,6 +90,62 @@ _MANUAL_FALLBACK_LAYOUTS = {
     "n8n-nodes-base.switch": ("operations", "items, results, execution"),
 }
 
+_UNSUPPORTED_SETTING_MARKERS = (
+    "unsupported",
+    "not supported",
+    "неподдерж",
+    "не поддержива",
+    "неизвестн",
+    "не удалось преобразовать",
+    "не найдено выражение",
+    "unknown",
+)
+
+
+def _can_generate_manual_fallback(node: dict[str, Any], error: Exception) -> bool:
+    """Определить, можно ли заменить неподдержанную часть узла TODO-заготовкой.
+
+    Неизвестная версия допускает fallback сама по себе. Для известной версии
+    fallback применяется только к ошибкам, явно указывающим на неизвестную или
+    неподдерживаемую настройку; ошибки структуры и графа остаются диагностикой.
+    """
+    kind = node.get("type")
+    if kind not in _MANUAL_FALLBACK_LAYOUTS and kind != "n8n-nodes-base.splitInBatches":
+        return False
+    if node_version_info(node) is not None:
+        return True
+    message = str(error).casefold()
+    return any(marker in message for marker in _UNSUPPORTED_SETTING_MARKERS)
+
+
+def _manual_fallback_description(
+    node: dict[str, Any],
+    payload: dict[str, Any],
+    error: Exception | str | None = None,
+) -> str:
+    """Сформировать безопасную заметку, не копируя значения параметров и секреты."""
+    name = str(node.get("name") or "Без имени").replace("\r", " ").replace("\n", " ")
+    paths = list(
+        payload.get("unsupported_parameter_paths")
+        or payload.get("parameter_paths", ())
+    )
+    if error is not None:
+        error_text = str(error).casefold()
+        matched_paths = [
+            path
+            for path in paths
+            if str(path).rsplit(".", 1)[-1].split("[", 1)[0].casefold() in error_text
+        ]
+        if matched_paths:
+            paths = matched_paths
+    settings = ", ".join(
+        str(path).replace("\r", " ").replace("\n", " ") for path in paths
+    ) or "параметры узла"
+    return (
+        f"Узел {name}: сгенерирована ручная TODO-заготовка; проверьте настройки "
+        f"({settings}) и реализуйте их в generated-коде."
+    )
+
 
 def _manual_version_fallback_source(
     node: dict[str, Any],
@@ -122,7 +178,11 @@ def _manual_version_fallback_source(
     )
 
 
-def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
+def node_conversion_issues(
+    workflow: Any,
+    *,
+    manual_fallback_warnings: list[tuple[str | None, str]] | None = None,
+) -> list[tuple[str | None, str]]:
     """Независимо проверить настройки каждого узла для команды ``validate``.
 
     Проверяется генерация модуля без построения исполняемой цепочки. Поэтому
@@ -209,6 +269,14 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
             continue
 
         conversion_node = compatible_node(node)
+        compatible_parameters = manual_parameter_payload(node)
+        if (
+            manual_fallback_warnings is not None
+            and compatible_parameters.get("unsupported_parameter_paths")
+        ):
+            warning = _manual_fallback_description(node, compatible_parameters)
+            if (name, warning) not in manual_fallback_warnings:
+                manual_fallback_warnings.append((name, warning))
         try:
             if kind == "n8n-nodes-base.code":
                 generate_code_node(conversion_node, "run_node")
@@ -268,19 +336,15 @@ def node_conversion_issues(workflow: Any) -> list[tuple[str | None, str]]:
             elif kind in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}:
                 generate_condition_node(conversion_node, "run_node")
         except Exception as exc:
-            wait_parameters = node.get("parameters")
-            wait_resume = (
-                wait_parameters.get("resume")
-                if kind == "n8n-nodes-base.wait" and isinstance(wait_parameters, dict)
-                else None
-            )
             if (
-                wait_resume not in ("webhook", "form")
-                and node_version_info(node) is not None
-                and isinstance(exc, (WorkflowError, KeyError, TypeError, ValueError))
+                isinstance(exc, (WorkflowError, KeyError, TypeError, ValueError))
+                and _can_generate_manual_fallback(node, exc)
             ):
-                # В generate_project такой узел получит явную ручную заготовку,
-                # если его новая схема не совпадает с известной конвертеру.
+                payload = manual_parameter_payload(node, force=True)
+                if manual_fallback_warnings is not None:
+                    warning = _manual_fallback_description(node, payload, exc)
+                    if (name, warning) not in manual_fallback_warnings:
+                        manual_fallback_warnings.append((name, warning))
                 continue
             message = str(exc) if isinstance(exc, WorkflowError) else (
                 f"{label}: не удалось проверить узел ({type(exc).__name__})."
@@ -870,16 +934,20 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
     uses_data_tables = False
     data_table_mappings: dict[str, str] = {}
     version_notes: list[tuple[str, str]] = []
+    manual_fallback_notes: list[str] = []
     # Для каждого узла создаём отдельный модуль; ниже формируется его вызов в main.py.
     for name in order:
         node = nodes[name]
         kind = node["type"]
         conversion_node = compatible_node(node)
-        version_info = node_version_info(node)
         version_warning = node_version_warning(node)
-        manual_parameters = manual_parameter_payload(node) if version_info else None
+        manual_parameters = manual_parameter_payload(node) or None
         if version_warning:
             version_notes.append((name, version_warning))
+        if manual_parameters and manual_parameters.get("unsupported_parameter_paths"):
+            note = _manual_fallback_description(node, manual_parameters)
+            if note not in manual_fallback_notes:
+                manual_fallback_notes.append(note)
         # Оставляем в main.py отметку обо всех узлах, в том числе о пропущенных триггерах.
         node_comment = name.replace("\r", " ").replace("\n", " ")
         kind_comment = kind.replace("\r", " ").replace("\n", " ")
@@ -1080,22 +1148,15 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 arguments = "items, results, execution"
             else:
                 raise WorkflowError(f"Узел {name}: неподдерживаемый тип {kind}")
-        except (WorkflowError, KeyError, TypeError, ValueError):
-            wait_parameters = node.get("parameters")
-            if (
-                kind == "n8n-nodes-base.wait"
-                and isinstance(wait_parameters, dict)
-                and wait_parameters.get("resume") in ("webhook", "form")
-            ):
-                raise
+        except (WorkflowError, KeyError, TypeError, ValueError) as exc:
             fallback_layout = _MANUAL_FALLBACK_LAYOUTS.get(kind)
-            if version_info is None or fallback_layout is None:
+            if fallback_layout is None or not _can_generate_manual_fallback(node, exc):
                 raise
             folder, arguments = fallback_layout
-            manual_parameters = dict(manual_parameters or {})
-            manual_parameters["unsupported_parameter_paths"] = manual_parameters.get(
-                "parameter_paths", ()
-            )
+            manual_parameters = manual_parameter_payload(node, force=True)
+            note = _manual_fallback_description(node, manual_parameters, exc)
+            if note not in manual_fallback_notes:
+                manual_fallback_notes.append(note)
             if kind == "n8n-nodes-base.httpRequest" and is_gmail_send_node(node):
                 folder = "email_senders"
             source = _manual_version_fallback_source(
@@ -1118,6 +1179,8 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
         if manual_parameters is not None:
             call_arguments += f", n8n_manual_parameters={manual_parameters!r}"
         invocation = f"await {stem}({call_arguments})"
+        if manual_parameters and manual_parameters.get("unsupported_parameter_paths"):
+            calls.append(f"    # TODO: {_manual_fallback_description(node, manual_parameters)}")
         # Сохраняем исходник модуля и регистрируем импорт для явного вызова из main.py.
         files[f"{folder}/{stem}.py"] = source
         files[f"{folder}/__init__.py"] = ""
@@ -1596,11 +1659,22 @@ def _clean_items(items):
             + "\n".join(f"- {message}" for _, message in version_notes)
             + "\n\n"
         )
+    manual_fallback_documentation = ""
+    if manual_fallback_notes:
+        manual_fallback_documentation = (
+            "## Узлы для ручной доработки\n\n"
+            "Эти узлы включены в проект как TODO-заготовки. Их вызовы сохранены в `main.py`, "
+            "а запуск остановится с `NotImplementedError`, пока не будет реализована неизвестная часть. "
+            "Пути перечисляют только имена настроек; значения workflow и секреты не копируются.\n\n"
+            + "\n".join(f"- {note}" for note in manual_fallback_notes)
+            + "\n\n"
+        )
     files["README.md"] = (
         '# Сгенерированный проект\n\n'
         'Проект запускает преобразованный workflow как обычную Python-программу. Исходный JSON для запуска не нужен.\n\n'
         + trigger_documentation
         + version_documentation
+        + manual_fallback_documentation
         + data_table_documentation
         + wait_documentation
         + '## Требования и установка\n\n'
@@ -1636,9 +1710,14 @@ def _clean_items(items):
         + "\n".join(f"- {message}" for _, message in version_notes)
         if version_notes else ""
     )
+    manual_fallback_report = (
+        "\n\nУзлы для ручной доработки:\n"
+        + "\n".join(f"- {note}" for note in manual_fallback_notes)
+        if manual_fallback_notes else ""
+    )
     files["conversion_report.md"] = (f'# Отчёт о конвертации\n\nУзлов: {len(nodes)}. '
         f'Преобразовано: {converted}. Моделей подключено: {len(model_names)}. Триггеров пропущено: {skipped}.\n\n'
-        f'Настройки авторизации: {credentials}.' + version_report + '\n')
+        f'Настройки авторизации: {credentials}.' + version_report + manual_fallback_report + '\n')
     return files
 
 

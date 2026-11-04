@@ -14,9 +14,9 @@ from n8n_transcriper.reader import WorkflowError
 def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
     """Сгенерировать функцию ручного Edit Fields и собрать ссылки на другие узлы.
 
-    Поддерживаются версии Set 3.3–3.5, режим manual, типизированные назначения
-    и статический выбор JSON-полей. Неизвестные настройки отклоняются, чтобы
-    generated-код не потерял незамеченную семантику исходного узла.
+    Версия Set используется только для значений по умолчанию и старого режима
+    выбора входных полей. Известные параметры обрабатываются по их наличию и
+    типу, даже если они пришли из другой версии узла.
 
     Returns:
         Исходник модуля и имена узлов, используемых в expressions.
@@ -47,10 +47,16 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
         legacy_include = source_version < 3.3
     else:
         legacy_include = False
-    if legacy_include and "includeOtherFields" in p:
-        raise WorkflowError(f"Узел {name}: Include Other Input недоступен в этой версии Edit Fields")
-    # Старые версии управляли входными полями через include; новые используют отдельный переключатель.
-    selection = p.get("include", "all") if legacy_include else (p.get("include", "all") if include else "none")
+    # Явный параметр важнее версии: старые и новые workflow могут содержать
+    # разные варианты настройки Include Other Input.
+    if "includeOtherFields" in p:
+        selection = p.get("include", "all") if include else "none"
+    elif "include" in p:
+        selection = p["include"]
+        include = selection != "none"
+    else:
+        include = legacy_include
+        selection = "all" if legacy_include else "none"
     selection_field = "includeFields" if selection == "selected" else "excludeFields" if selection == "except" else None
     fields_text = p.get(selection_field, "") if selection_field else ""
     if not isinstance(fields_text, str) or "{{" in fields_text or any(c in fields_text for c in ".["):
@@ -67,13 +73,24 @@ def generate_edit_fields(node: dict[str, Any], function_name: str) -> tuple[str,
     for option, value in options.items():
         if not isinstance(value, bool):
             raise WorkflowError(f"Узел {name}: настройка {option} должна быть логической")
-    if (version >= 3.4 and "includeBinary" in options) or (version < 3.4 and "stripBinary" in options):
-        raise WorkflowError(f"Узел {name}: настройка binary не поддерживается этой версией")
-    keep_binary = (
-        include and selection != "none" and not options.get("stripBinary", True)
-        if version >= 3.4
-        else options.get("includeBinary", True)
-    )
+    # При конфликте двух исторических вариантов версия помогает выбрать активный
+    # ключ. Если задан только один известный ключ, читаем его в любой версии.
+    if "stripBinary" in options and "includeBinary" in options:
+        keep_binary = (
+            include and selection != "none" and not options["stripBinary"]
+            if version >= 3.4
+            else options["includeBinary"]
+        )
+    elif "stripBinary" in options:
+        keep_binary = include and selection != "none" and not options["stripBinary"]
+    elif "includeBinary" in options:
+        keep_binary = options["includeBinary"]
+    else:
+        keep_binary = (
+            include and selection != "none" and not options.get("stripBinary", True)
+            if version >= 3.4
+            else options.get("includeBinary", True)
+        )
     ignore_conversion_errors = options.get("ignoreConversionErrors", False)
     assignments = p.get("assignments", {})
     if not isinstance(assignments, dict) or set(assignments) - {"assignments"} or not isinstance(assignments.get("assignments", []), list):

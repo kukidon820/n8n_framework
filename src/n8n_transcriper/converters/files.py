@@ -515,7 +515,7 @@ def _generate_binary_file(node: dict[str, Any], function_name: str, check: Any) 
     source = parameters.get("sourceProperty")
     output = parameters.get("binaryPropertyName", "data")
     node_version = node.get("typeVersion", 1)
-    data_is_base64 = options.get("dataIsBase64", True) if node_version == 1 else True
+    data_is_base64 = options.get("dataIsBase64", True)
     add_bom = options.get("addBOM", False)
     encoding = _check_encoding(name, options.get("encoding", "utf8"))
     filename = options.get("fileName", "")

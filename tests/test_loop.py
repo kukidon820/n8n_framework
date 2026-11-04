@@ -91,6 +91,20 @@ def test_loop_settings_reject_invalid_values():
         generate_loop_node(node("Loop", "n8n-nodes-base.splitInBatches", {"options": {"reset": "={{ true }}"}}, 3))
 
 
+@pytest.mark.parametrize("version", [3, 4])
+def test_unknown_loop_version_and_parameter_do_not_block_code_generation(tmp_path, version):
+    workflow = standard_loop_workflow(3)
+    loop = next(node for node in workflow["nodes"] if node["name"] == "Loop Items")
+    loop["typeVersion"] = version
+    loop["parameters"]["futureOption"] = {"enabled": True}
+
+    files = generate_project(workflow, tmp_path / "future-loop")
+
+    assert "operations/loop.py" in files
+    assert "async for loop_batch" in files["main.py"]
+    assert "futureOption" in files["main.py"]
+
+
 @pytest.mark.parametrize("version", [1, 2, 3])
 def test_generated_loop_batches_items_and_exposes_done_output(tmp_path, version):
     output = tmp_path / f"generated-v{version}"

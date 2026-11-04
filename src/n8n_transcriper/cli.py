@@ -274,7 +274,11 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
     # Сначала собираются независимые ошибки структуры и настроек каждого узла.
     structural_issues = validate_workflow_issues(data)
     issues.extend(("проверка структуры", issue) for issue in structural_issues)
-    node_issues = node_conversion_issues(data)
+    manual_fallback_warnings: list[tuple[str | None, str]] = []
+    node_issues = node_conversion_issues(
+        data,
+        manual_fallback_warnings=manual_fallback_warnings,
+    )
     issues.extend(("проверка узлов и настроек", issue) for _, issue in node_issues)
 
     edges = []
@@ -306,6 +310,8 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
         _echo_terminal_safe(f"Обнаружено проблем: {len(issues)}", err=True)
         for _, warning in version_warnings:
             _echo_terminal_safe(f"Предупреждение: {warning}", err=True)
+        for _, warning in manual_fallback_warnings:
+            _echo_terminal_safe(f"Предупреждение: {warning}", err=True)
         for index, (stage, issue) in enumerate(issues, start=1):
             _echo_terminal_safe(f"{index}. [{stage}] {issue}", err=True)
         raise typer.Exit(1)
@@ -325,4 +331,6 @@ def validate(workflow: Path = typer.Argument(help="Путь к JSON-файлу w
     _echo_terminal_safe(f"Синтаксис сгенерированного Python проверен: {python_file_count} файлов.")
     _echo_terminal_safe("Ошибок совместимости, графа и expressions не найдено.")
     for _, warning in version_warnings:
+        _echo_terminal_safe(f"Предупреждение: {warning}")
+    for _, warning in manual_fallback_warnings:
         _echo_terminal_safe(f"Предупреждение: {warning}")
