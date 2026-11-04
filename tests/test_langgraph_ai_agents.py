@@ -70,6 +70,10 @@ def _load_generated_module(source: str, monkeypatch: pytest.MonkeyPatch):
     agents.create_agent = create_agent
     openai = types.ModuleType("langchain_openai")
     openai.ChatOpenAI = FakeChatOpenAI
+    google_genai = types.ModuleType("langchain_google_genai")
+    google_genai.ChatGoogleGenerativeAI = FakeChatOpenAI
+    ollama = types.ModuleType("langchain_ollama")
+    ollama.ChatOllama = FakeChatOpenAI
     config = types.ModuleType("config")
     config.LANGGRAPH_HTTP_LLM_REQUEST_BASE_URL = "https://internal.example/api"
     config.LANGGRAPH_HTTP_LLM_REQUEST_API_KEY = ""
@@ -78,6 +82,8 @@ def _load_generated_module(source: str, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "langchain", langchain)
     monkeypatch.setitem(sys.modules, "langchain.agents", agents)
     monkeypatch.setitem(sys.modules, "langchain_openai", openai)
+    monkeypatch.setitem(sys.modules, "langchain_google_genai", google_genai)
+    monkeypatch.setitem(sys.modules, "langchain_ollama", ollama)
     monkeypatch.setitem(sys.modules, "config", config)
     module = types.ModuleType("generated_ai_node")
     monkeypatch.setitem(sys.modules, "generated_ai_node", module)
@@ -146,10 +152,81 @@ def test_langgraph_mode_generates_provider_agent_from_internal_chat_body(
     assert isinstance(model_kwargs, dict)
     assert model_kwargs["api_key"] == "test-key"
     assert model_kwargs["model"] == "private-model"
-    assert model_kwargs["model_kwargs"] == {
-        "temperature": 0.7,
-        "max_tokens": 2000,
-    }
+    assert model_kwargs["temperature"] == 0.7
+    assert model_kwargs["max_tokens"] == 2000
+    assert "model_kwargs" not in model_kwargs
+
+
+def test_gemini_generation_config_and_ollama_options_reach_model_constructor(
+    monkeypatch,
+):
+    gemini_files = generate_project(
+        {
+            "nodes": [
+                _http_node(
+                    url=(
+                        "https://generativelanguage.googleapis.com/v1beta/models/"
+                        "gemini-test:generateContent"
+                    ),
+                    body={
+                        "contents": [
+                            {"parts": [{"text": "Summarize this"}]}
+                        ],
+                        "generationConfig": {
+                            "temperature": 0.35,
+                            "maxOutputTokens": 640,
+                            "candidateCount": 2,
+                        },
+                    },
+                )
+            ],
+            "connections": {},
+        },
+        langgraph=True,
+    )
+    gemini_module, gemini_captured = _load_generated_module(
+        gemini_files["ai_nodes/llm_request.py"], monkeypatch
+    )
+    gemini_module.config.LANGGRAPH_HTTP_LLM_REQUEST_API_KEY = "gemini-key"
+    asyncio.run(
+        gemini_module.run_node(
+            [{"json": {}}], {}, {"id": "execution-gemini"}
+        )
+    )
+    gemini_options = gemini_captured["model_kwargs"]
+    assert isinstance(gemini_options, dict)
+    assert gemini_options["temperature"] == 0.35
+    assert gemini_options["max_output_tokens"] == 640
+    assert gemini_options["candidate_count"] == 2
+
+    ollama_files = generate_project(
+        {
+            "nodes": [
+                _http_node(
+                    url="http://localhost:11434/api/chat",
+                    body={
+                        "model": "local-test",
+                        "messages": [{"role": "user", "content": "Hello"}],
+                        "options": {"temperature": 0.55, "num_predict": 240},
+                    },
+                )
+            ],
+            "connections": {},
+        },
+        langgraph=True,
+    )
+    ollama_module, ollama_captured = _load_generated_module(
+        ollama_files["ai_nodes/llm_request.py"], monkeypatch
+    )
+    asyncio.run(
+        ollama_module.run_node(
+            [{"json": {}}], {}, {"id": "execution-ollama"}
+        )
+    )
+    ollama_options = ollama_captured["model_kwargs"]
+    assert isinstance(ollama_options, dict)
+    assert ollama_options["temperature"] == 0.55
+    assert ollama_options["num_predict"] == 240
 
 
 def test_langgraph_mode_moves_static_http_secret_to_config_without_self_reference():
@@ -402,5 +479,3 @@ def test_n8n_ai_agent_uses_connected_provider_model_only_in_langgraph_mode():
     for path, content in langgraph_files.items():
         if path.endswith(".py"):
             compile(content, path, "exec")
-
-\n

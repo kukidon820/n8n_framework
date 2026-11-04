@@ -203,7 +203,7 @@ def _model_constructor(provider: str, *, model: str, base_url: str, key: str, op
     if provider in {"openai", "deepseek", "openrouter", "openai_compatible"}:
         return (
             f"ChatOpenAI(model={model}, base_url={base_url}, api_key={key}, "
-            f"default_headers=headers or None, model_kwargs={options})"
+            f"default_headers=headers or None, **{options})"
         )
     if provider == "anthropic":
         return (
@@ -479,6 +479,26 @@ async def run_node(items, results, execution):
 
 
 def _model_options(payload, provider):
+    values = dict(payload)
+    if provider in {"gemini", "gemini_compatible"}:
+        generation_config = payload.get("generationConfig")
+        if isinstance(generation_config, dict):
+            values.update(generation_config)
+        aliases = {{
+            "maxOutputTokens": "max_output_tokens",
+            "candidateCount": "candidate_count",
+            "stopSequences": "stop",
+            "frequencyPenalty": "frequency_penalty",
+            "presencePenalty": "presence_penalty",
+        }}
+        for source_name, model_name in aliases.items():
+            if source_name in values:
+                values[model_name] = values[source_name]
+    elif provider == "ollama":
+        provider_options = payload.get("options")
+        if isinstance(provider_options, dict):
+            values.update(provider_options)
+
     source_to_model = {{
         "openai": {{"temperature", "max_tokens", "top_p", "stop", "frequency_penalty", "presence_penalty"}},
         "deepseek": {{"temperature", "max_tokens", "top_p", "stop", "frequency_penalty", "presence_penalty"}},
@@ -489,11 +509,11 @@ def _model_options(payload, provider):
         "gemini_compatible": {{"temperature", "top_p", "top_k", "candidate_count", "max_output_tokens"}},
         "ollama": {{"temperature", "top_p", "top_k", "num_predict", "stop"}},
     }}
-    options = {{key: payload[key] for key in source_to_model[provider] if key in payload}}
-    if provider in {{"gemini", "gemini_compatible"}} and "max_tokens" in payload:
-        options.setdefault("max_output_tokens", payload["max_tokens"])
-    if provider == "ollama" and "max_tokens" in payload:
-        options.setdefault("num_predict", payload["max_tokens"])
+    options = {{key: values[key] for key in source_to_model[provider] if key in values}}
+    if provider in {{"gemini", "gemini_compatible"}} and "max_tokens" in values:
+        options.setdefault("max_output_tokens", values["max_tokens"])
+    if provider == "ollama" and "max_tokens" in values:
+        options.setdefault("num_predict", values["max_tokens"])
     return options
 '''.replace("{body_line}", f"payload = {body_code}")
     if api_key_header:
@@ -645,5 +665,3 @@ async def run_node(items, results, execution):
     return output
 '''
     return source, references, _MODEL_PACKAGES[provider]
-
-\n
