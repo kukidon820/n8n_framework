@@ -22,7 +22,7 @@ def _code_node(name: str, code: str) -> dict[str, object]:
     }
 
 
-def _run_generated(output, items):
+def _run_generated(output, items, *, include_stdout=False):
     langgraph_package = output / "langgraph"
     langgraph_package.mkdir(exist_ok=True)
     (langgraph_package / "__init__.py").write_text("", encoding="utf-8")
@@ -50,7 +50,12 @@ class StateGraph:
 ''',
         encoding="utf-8",
     )
-    script = f"import json, main; print(json.dumps(main.run({items!r})) )"
+    script = (
+        "import json,logging,sys; "
+        "sys.stdout.reconfigure(encoding='utf-8'); "
+        "logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s', stream=sys.stdout); "
+        f"import main; print(json.dumps(main.run({items!r})))"
+    )
     result = subprocess.run(
         [sys.executable, "-c", script],
         cwd=output,
@@ -60,7 +65,9 @@ class StateGraph:
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    output_lines = [line for line in result.stdout.splitlines() if line.strip()]
+    value = json.loads(output_lines[-1])
+    return (value, result.stdout) if include_stdout else value
 
 
 def test_default_generation_remains_direct_and_has_no_langgraph_dependency():
@@ -102,9 +109,14 @@ def test_langgraph_mode_runs_each_n8n_node_as_a_graph_step(tmp_path):
     assert "builder.add_node('step_1'" in files["main.py"]
     assert "langgraph>=1.0" in files["requirements.txt"]
     assert "workflow_runtime.py" not in files
-    assert _run_generated(output, [{"json": {"value": 4}}]) == [
-        {"json": {"result": 5}}
-    ]
+    result, logs = _run_generated(
+        output, [{"json": {"value": 4}}], include_stdout=True
+    )
+    assert result == [{"json": {"result": 5}}]
+    assert "Workflow «без имени»: запуск" in logs
+    assert "Узел «Build»: начат" in logs
+    assert "Узел «Build»: завершён; выходных элементов: 1" in logs
+    assert "Workflow завершён; выходных элементов: 1" in logs
 
 
 def test_langgraph_graph_preserves_if_ports_and_joins_selected_branches(tmp_path):
