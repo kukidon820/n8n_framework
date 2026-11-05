@@ -40,7 +40,7 @@ from n8n_transcriper.converters.smtp import (
     is_gmail_send_node,
 )
 from n8n_transcriper.converters.wait import generate_wait_node
-from n8n_transcriper.graph import connections, execution_order, loop_feedback_edges
+from n8n_transcriper.graph import Connection, connections, execution_order, loop_feedback_edges
 from n8n_transcriper.expressions import compile_expression
 from n8n_transcriper.reader import WorkflowError
 from n8n_transcriper.versioning import (
