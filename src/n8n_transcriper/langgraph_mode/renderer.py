@@ -198,6 +198,21 @@ def _make_node(name, runner, parents, kind, output_count=1, execute_once=False,
     return invoke
 
 
+def _logged_step(name, action):
+    async def invoke(state):
+        logging.info("Узел «%s»: начат", name)
+        try:
+            update = await action(state)
+        except Exception:
+            logging.exception("Узел «%s»: ошибка выполнения", name)
+            raise
+        item_count = len(update.get("results", {}).get(name, []))
+        logging.info("Узел «%s»: завершён; выходных элементов: %d", name, item_count)
+        return update
+
+    return invoke
+
+
 def _make_loop_node(name, loop_class, parents, loop_output, done_output,
                     output_count, body_graph, feedback_source, feedback_output,
                     batch_size, reset, execute_once, retry_on_fail, max_tries,
@@ -360,13 +375,13 @@ def render_langgraph_main(
             output_count = len(rules) + (fallback == "extra")
         calls.extend(
             [
-                f"    builder.add_node({('step_' + str(index))!r}, _make_node(",
+                f"    builder.add_node({('step_' + str(index))!r}, _logged_step({name!r}, _make_node(",
                 f"        {name!r}, {runner}, {parent_data!r}, {kind!r},",
                 f"        output_count={output_count},",
                 f"        execute_once={bool(node.get('executeOnce', False))!r},",
                 f"        always_output_data={bool(node.get('alwaysOutputData', False))!r},",
                 f"        linked_items={bool(linked_names)!r},",
-                "    ))",
+                "    )))",
             ]
         )
 
@@ -417,6 +432,7 @@ def render_langgraph_main(
         + "workflow_graph = _build_graph()\n\n\n"
         + "async def run_async(input_data=None):\n"
         + '    """Запустить граф и вернуть items его конечных узлов."""\n'
+        + f"    logging.info('Workflow «%s»: запуск', {str(workflow.get('name') or 'без имени')!r})\n"
         + '    items = input_data if input_data is not None else [{"json": {}}]\n'
         + "    if isinstance(items, dict):\n        items = [items]\n"
         + "    state = await workflow_graph.ainvoke({\n"
@@ -425,7 +441,9 @@ def render_langgraph_main(
         + "        'outputs': {},\n"
         + "        'results': {},\n"
         + "    })\n"
-        + f"    return {terminal_expr}\n\n\n"
+        + f"    result = {terminal_expr}\n"
+        + "    logging.info('Workflow завершён; выходных элементов: %d', len(result))\n"
+        + "    return result\n\n\n"
         + "def run(input_data=None):\n"
         + '    """Синхронно запустить асинхронный LangGraph workflow."""\n'
         + '    if sys.platform == "win32":\n'
@@ -433,8 +451,13 @@ def render_langgraph_main(
         + "            return runner.run(run_async(input_data))\n"
         + "    return asyncio.run(run_async(input_data))\n\n\n"
         + 'if __name__ == "__main__":\n'
+        + "    if hasattr(sys.stdout, 'reconfigure'):\n        sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')\n"
         + "    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s', stream=sys.stdout)\n"
-        + "    run()\n"
+        + "    try:\n"
+        + "        run()\n"
+        + "    except Exception as exc:\n"
+        + "        logging.error('Workflow остановлен с ошибкой: %s', exc)\n"
+        + "        raise SystemExit(1) from None\n"
     )
     return source
 
@@ -515,9 +538,9 @@ def _render_loop_graph(
                 f"linked_items={bool(linked_names)!r}, manual_parameters={manual_parameters!r}",
             ]
             return [
-                f"{indent}builder.add_node({key!r}, _make_loop_node(",
+                f"{indent}builder.add_node({key!r}, _logged_step({name!r}, _make_loop_node(",
                 *(f"{indent}    {argument}" for argument in arguments),
-                f"{indent}))",
+                f"{indent})))",
             ]
 
         runner = "None" if _is_trigger(node) else aliases.get(name)
@@ -529,13 +552,13 @@ def _render_loop_graph(
             fallback = node.get("parameters", {}).get("options", {}).get("fallbackOutput")
             output_count = len(rules) + (fallback == "extra")
         return [
-            f"{indent}builder.add_node({key!r}, _make_node(",
+            f"{indent}builder.add_node({key!r}, _logged_step({name!r}, _make_node(",
             f"{indent}    {name!r}, {runner}, {input_nodes!r}, {kind!r},",
             f"{indent}    output_count={output_count},",
             f"{indent}    execute_once={bool(node.get('executeOnce', False))!r},",
             f"{indent}    always_output_data={bool(node.get('alwaysOutputData', False))!r},",
             f"{indent}    linked_items={bool(linked_names)!r}, inside_loop={inside_loop!r},",
-            f"{indent}))",
+            f"{indent})))",
         ]
 
     def edges_for(keys: list[str], indent: str) -> list[str]:
@@ -602,6 +625,7 @@ def _render_loop_graph(
         + "\n".join(graph_lines)
         + "\n\nasync def run_async(input_data=None):\n"
         + '    """Запустить граф и вернуть данные конечных узлов."""\n'
+        + f"    logging.info('Workflow «%s»: запуск', {str(workflow.get('name') or 'без имени')!r})\n"
         + '    items = input_data if input_data is not None else [{"json": {}}]\n'
         + "    if isinstance(items, dict):\n        items = [items]\n"
         + "    state = await workflow_graph.ainvoke({\n"
@@ -610,7 +634,9 @@ def _render_loop_graph(
         + "        'outputs': {},\n"
         + "        'results': {},\n"
         + "    })\n"
-        + f"    return {terminal}\n\n\n"
+        + f"    result = {terminal}\n"
+        + "    logging.info('Workflow завершён; выходных элементов: %d', len(result))\n"
+        + "    return result\n\n\n"
         + "def run(input_data=None):\n"
         + '    """Синхронная обёртка для запуска асинхронного графа."""\n'
         + '    if sys.platform == "win32":\n'
@@ -618,8 +644,13 @@ def _render_loop_graph(
         + "            return runner.run(run_async(input_data))\n"
         + "    return asyncio.run(run_async(input_data))\n\n\n"
         + 'if __name__ == "__main__":\n'
+        + "    if hasattr(sys.stdout, 'reconfigure'):\n        sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')\n"
         + "    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s', stream=sys.stdout)\n"
-        + "    run()\n"
+        + "    try:\n"
+        + "        run()\n"
+        + "    except Exception as exc:\n"
+        + "        logging.error('Workflow остановлен с ошибкой: %s', exc)\n"
+        + "        raise SystemExit(1) from None\n"
     )
     return source
 

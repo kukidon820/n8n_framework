@@ -112,8 +112,8 @@ def test_generated_main_writes_info_logs_to_stdout_and_includes_platform_launche
     )
 
     assert result.returncode == 0, result.stderr
-    assert "[INFO] Build: начат" in result.stdout
-    assert "[INFO] Build: завершён" in result.stdout
+    assert "[INFO] Узел «Build»: начат" in result.stdout
+    assert "[INFO] Узел «Build»: завершён; выходных элементов: 1" in result.stdout
     assert result.stderr == ""
 
     launcher_path = output / "run.bat"

@@ -4,6 +4,7 @@
 независимый Python-проект только после успешной проверки совместимости.
 """
 import copy
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -65,6 +66,56 @@ def _create_uv_lock(project: Path) -> None:
         if detail:
             message += f"\n{detail}"
         raise WorkflowError(message)
+
+
+def _show_conversion_summary(files: dict[str, str], output: Path) -> None:
+    """Показать короткий итог и предупредить о частичной конвертации.
+
+    Подробные причины пропуска узлов остаются в generated-отчёте, а здесь
+    печатаются только важные для оператора числа и путь к этому отчёту.
+    """
+    report = files.get("conversion_report.md", "")
+    summary = re.search(
+        r"Узлов в исходном workflow: (\d+)\. Преобразовано: (\d+)\. "
+        r"Моделей подключено: (\d+)\. Триггеров пропущено: (\d+)\. "
+        r"Частей с комментариями: (\d+)\.",
+        report,
+    )
+    python_files = sum(path.endswith(".py") for path in files)
+    if summary:
+        total, converted, models, triggers, skipped = map(int, summary.groups())
+        _echo_terminal_safe(
+            f"Результат: преобразовано узлов {converted} из {total}; "
+            f"моделей ИИ подключено: {models}; триггеров пропущено: {triggers}; "
+            f"непереведённых частей: {skipped}."
+        )
+        if skipped:
+            skipped_nodes = re.findall(
+                r"(?m)^- \*\*(.+?)\*\* \(`([^`]*)`\): (.+)$", report
+            )
+            for name, kind, reason in skipped_nodes:
+                _echo_terminal_safe(
+                    f"Предупреждение: узел «{name}» ({kind}) не переведён: {reason}",
+                    err=True,
+                )
+            _echo_terminal_safe(
+                f"Предупреждение: часть workflow не переведена. "
+                f"Причины указаны в {output / 'conversion_report.md'}.",
+                err=True,
+            )
+    else:
+        _echo_terminal_safe(f"Создано Python-файлов: {python_files}.")
+
+    if "Узлы для ручной доработки:" in report:
+        manual_notes = report.partition("Узлы для ручной доработки:")[2]
+        for line in manual_notes.splitlines():
+            if line.startswith("- "):
+                _echo_terminal_safe(f"Предупреждение: {line[2:]}", err=True)
+        _echo_terminal_safe(
+            f"Предупреждение: некоторые параметры требуют ручной доработки. "
+            f"Подробности: {output / 'conversion_report.md'}.",
+            err=True,
+        )
 
 
 def _node_name_for_error(message: str, nodes: list[dict]) -> str | None:
@@ -230,17 +281,33 @@ def convert(
         workflow: Исходный JSON-файл n8n.
         out: Пустая папка, куда записываются файлы проекта.
     """
+    phase = "чтение workflow"
     try:
+        _echo_terminal_safe(f"[1/4] Читаю workflow: {workflow}")
         data = read_workflow(workflow)
+        _echo_terminal_safe(
+            f"Прочитано узлов: {len(data['nodes'])}; "
+            f"workflow: {data.get('name') or 'без имени'}."
+        )
         warnings = node_version_warnings(data)
         for _, warning in warnings:
             _echo_terminal_safe(f"Предупреждение: {warning}")
-        generate_project(data, out, langgraph=langgraph)
+
+        phase = "генерация Python-проекта"
+        mode = "LangGraph" if langgraph else "прямые вызовы Python-функций"
+        _echo_terminal_safe(f"[2/4] Генерирую проект ({mode}) в {out}.")
+        files = generate_project(data, out, langgraph=langgraph)
+        _show_conversion_summary(files, out)
+
+        phase = "создание файла зависимостей uv.lock"
+        _echo_terminal_safe("[3/4] Создаю uv.lock и разрешаю зависимости...")
         _create_uv_lock(out)
-    except (WorkflowError, OSError) as exc:
-        typer.echo(f"Ошибка: {exc}", err=True)
+    except Exception as exc:
+        _echo_terminal_safe(
+            f"[ОШИБКА] Этап «{phase}»: {type(exc).__name__}: {exc}", err=True
+        )
         raise typer.Exit(1) from exc
-    typer.echo(f"Проект создан: {out}")
+    _echo_terminal_safe(f"[4/4] Конвертация завершена. Проект создан: {out}")
 
 
 @app.command()

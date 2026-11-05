@@ -1183,7 +1183,10 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
         call_arguments = arguments
         if manual_parameters is not None:
             call_arguments += f", n8n_manual_parameters={manual_parameters!r}"
-        invocation = f"await {stem}({call_arguments})"
+        invocation = (
+            f"await _run_logged_node({name!r}, "
+            f"lambda: {stem}({call_arguments}))"
+        )
         if manual_parameters and manual_parameters.get("unsupported_parameter_paths"):
             calls.append(f"    # TODO: {_manual_fallback_description(node, manual_parameters)}")
         # Сохраняем исходник модуля и регистрируем импорт для явного вызова из main.py.
@@ -1201,6 +1204,9 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 value = f"{aliases[edge.source]}[{edge.output}]"
                 fanout = sum(1 for item in main_edges if item.source == edge.source and item.output == edge.output) > 1
                 calls.append(f"    items.extend({'deepcopy(' + value + ')' if fanout else value})")
+            calls.append(
+                f"    logging.info({('Узел «' + name + '»: начат; входных элементов: %d')!r}, len(items))"
+            )
             calls.extend([
                 # Экземпляр хранит настройки пакетов и выполнения конкретного Loop.
                 (
@@ -1214,13 +1220,14 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     ")"
                 ),
                 f"    {aliases[name]} = [[] for _ in range({loop_settings.output_count})]",
-                f"    async for loop_batch in {loop_state_name}.iterate(items):",
+                "    try:",
+                f"        async for loop_batch in {loop_state_name}.iterate(items):",
             ])
             if linked_items:
-                calls.append(f"        {loop_state_name}.link_batch({name!r}, loop_batch)")
+                calls.append(f"            {loop_state_name}.link_batch({name!r}, loop_batch)")
             calls.extend([
-                f"        {aliases[name]}[{loop_settings.loop_output}] = loop_batch",
-                f"        results[{name!r}] = loop_batch",
+                f"            {aliases[name]}[{loop_settings.loop_output}] = loop_batch",
+                f"            results[{name!r}] = loop_batch",
             ])
             loop_body_call_start = len(calls)
             converted += 1
@@ -1251,20 +1258,22 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             outer_join = merge_params.get("mode") == "combine" and merge_params.get("combineBy", "combineByFields") == "combineByFields" and merge_params.get("joinMode", "keepMatches") != "keepMatches"
             append_merge = kind == "n8n-nodes-base.merge" and merge_params.get("mode", "append") == "append"
             ready = ("any(merge_inputs)" if include_unpaired or outer_join or append_merge else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
-            calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", f"    if {ready}:",
-                          f"        logging.info({(name + ': начат')!r})"])
+            calls.extend([
+                f"    {aliases[name]} = [[] for _ in range({count})]",
+                f"    if {ready}:",
+            ])
             if node.get("executeOnce", False):
                 calls.append("        items = items[:1]")
             if is_condition:
                 if linked_items:
                     calls.extend([
-                        f"        branch_outputs = await {stem}({call_arguments})",
+                        f"        branch_outputs = {invocation}",
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r}, "
                         f"len({loop_state_name}.results.get({name!r}, [])))" if name in loop_body_nodes else
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r})",
                     ])
                 else:
-                    calls.append(f"        {aliases[name]} = await {stem}({call_arguments})")
+                    calls.append(f"        {aliases[name]} = {invocation}")
             else:
                 if linked_items and kind != "n8n-nodes-base.merge":
                     calls.append("        source_items = items")
@@ -1293,7 +1302,10 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     if name in loop_body_nodes else "items"
                 )
                 calls.extend([f"        {aliases[name]}[0] = items", f"        results[{name!r}] = {stored_items}"])
-            calls.append(f"        logging.info({(name + ': завершён')!r})")
+            calls.extend([
+                "    else:",
+                f"        logging.info({('Узел «' + name + '»: пропущен — нет входных данных')!r})",
+            ])
             if is_condition:
                 flattened = f"[item for output in {aliases[name]} for item in output]"
                 stored_outputs = (
@@ -1302,7 +1314,11 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 )
                 calls.append(f"    results[{name!r}] = {stored_outputs}")
         else:
-            calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': начат')!r})"])
+            calls.extend([
+                "    if not items:",
+                f"        logging.info({('Узел «' + name + '»: пропущен — нет входных данных')!r})",
+                "        return []",
+            ])
             if node.get("executeOnce", False):
                 calls.append("    items = items[:1]")
             if linked_items:
@@ -1323,16 +1339,21 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 f"{loop_state_name}.record_result({name!r}, items)"
                 if name in loop_body_nodes else "items"
             )
-            calls.extend([f"    results[{name!r}] = {stored_items}", f"    logging.info({(name + ': завершён')!r})"])
+            calls.append(f"    results[{name!r}] = {stored_items}")
         converted += 1
         completed.add(name)
         if loop_info and name in loop_info["body"] and name == loop_body_order[-1]:
             for call_index in range(loop_body_call_start, len(calls)):
-                calls[call_index] = "    " + calls[call_index]
+                calls[call_index] = "        " + calls[call_index]
             feedback = loop_info["feedback"]
             calls.append(
-                f"        await {loop_state_name}.collect({aliases[feedback.source]}[{feedback.output}])"
+                f"            await {loop_state_name}.collect({aliases[feedback.source]}[{feedback.output}])"
             )
+            calls.extend([
+                "    except Exception as exc:",
+                f"        logging.error({('Узел «' + loop_info['name'] + '»: цикл прерван: %s')!r}, exc)",
+                "        raise",
+            ])
             loop_settings = loop_info["settings"]
             if loop_settings.done_output is not None:
                 calls.append(
@@ -1341,6 +1362,9 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 )
             calls.append(
                 f"    results[{loop_info['name']!r}] = {loop_state_name}.done_items"
+            )
+            calls.append(
+                f"    logging.info({('Узел «' + loop_info['name'] + '»: завершён; выходных элементов: %d')!r}, len({loop_state_name}.done_items))"
             )
     if not converted:
         raise WorkflowError("Workflow не содержит исполняемых поддерживаемых узлов")
@@ -1482,6 +1506,23 @@ def _clean_items(items):
         + "\n".join(imports)
         + "\n\n\n"
         + lineage_helpers
+        + '''
+
+async def _run_logged_node(node_name, operation):
+    """Выполнить узел, записать ход выполнения и сохранить контекст ошибки."""
+    logging.info("Узел «%s»: начат", node_name)
+    try:
+        result = await operation()
+    except Exception:
+        logging.exception("Узел «%s»: ошибка выполнения", node_name)
+        raise
+    if isinstance(result, list) and result and all(isinstance(port, list) for port in result):
+        item_count = sum(len(port) for port in result)
+    else:
+        item_count = len(result) if isinstance(result, list) else int(result is not None)
+    logging.info("Узел «%s»: завершён; выходных элементов: %d", node_name, item_count)
+    return result
+'''
         + f'\n\n{runner_definition} {runner_name}(input_data=None):\n'
         + '    """Вручную выполнить сгенерированную цепочку узлов.\n\n'
         + '    Args:\n'
@@ -1493,12 +1534,21 @@ def _clean_items(items):
         + '    items = input_data if input_data is not None else [{"json": {}}]\n'
         + '    results = {}\n'
         + '    execution = {"id": str(uuid.uuid4())}\n'
+        + f'    logging.info("Workflow «%s»: запуск; идентификатор: %s", {str(workflow.get("name") or "без имени")!r}, execution["id"])\n'
         + "\n".join(calls)
-        + f'\n    return {"_clean_items(" + return_code + ")" if linked_items else return_code}\n'
+        + f'\n    result = {"_clean_items(" + return_code + ")" if linked_items else return_code}\n'
+        + '    logging.info("Workflow завершён; выходных элементов: %d", len(result))\n'
+        + '    return result\n'
         + sync_wrapper
         + '\n\nif __name__ == "__main__":\n'
+        + '    if hasattr(sys.stdout, "reconfigure"):\n'
+        + '        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")\n'
         + '    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)\n'
-        + '    run()\n'
+        + '    try:\n'
+        + '        run()\n'
+        + '    except Exception as exc:\n'
+        + '        logging.error("Workflow остановлен с ошибкой: %s", exc)\n'
+        + '        raise SystemExit(1) from None\n'
     )
     files["run.bat"] = (
         "@echo off\n"
@@ -1520,8 +1570,8 @@ def _clean_items(items):
         "uv run python main.py\n"
         "workflow_exit_code=$?\n"
         'if [ -t 0 ]; then\n'
-        '    printf "\\nWorkflow finished with exit code %s.\\n" "$workflow_exit_code"\n'
-        '    printf "Press Enter to close this terminal..."\n'
+        '    printf "\\nСценарий завершён с кодом выхода %s.\\n" "$workflow_exit_code"\n'
+        '    printf "Нажмите Enter, чтобы закрыть терминал..."\n'
         '    IFS= read -r _\n'
         "fi\n"
         'exit "$workflow_exit_code"\n'
@@ -1753,7 +1803,9 @@ import sys
 
 async def run_async(input_data=None):
     """Асинхронно вернуть входные items, если все узлы были пропущены."""
-    return input_data if input_data is not None else [{"json": {}}]
+    items = input_data if input_data is not None else [{"json": {}}]
+    logging.info("Все исполняемые узлы пропущены; возвращаю исходные items: %d", len(items))
+    return items
 
 
 def run(input_data=None):
@@ -1765,6 +1817,8 @@ def run(input_data=None):
 
 
 if __name__ == "__main__":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", stream=sys.stdout)
     run()
 '''
