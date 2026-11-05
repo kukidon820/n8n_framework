@@ -311,7 +311,7 @@ async def {function_name}(items, results, execution):
         if inline_names:
             html_part = message.get_body(preferencelist=("html",))
             if html_part is None:
-                raise ValueError("Для inline-вложений options.attachments требуется emailFormat html или both")
+                raise ValueError("Для вложений options.attachments укажите emailFormat со значением html или both")
             for property_name in inline_names:
                 content, metadata = _binary_content(item, property_name)
                 mime_type = str(metadata.get("mimeType") or "application/octet-stream").split(";", 1)[0]

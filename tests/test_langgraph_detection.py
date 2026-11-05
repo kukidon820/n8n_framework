@@ -1,4 +1,4 @@
-"""Tests for opt-in detection of LLM-style HTTP requests."""
+"""Проверки распознавания HTTP-запросов к языковым моделям."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Generate LangChain agents for workflows converted with ``--langgraph``."""
+"""Сгенерировать AI-агентов для workflow, конвертируемых с ``--langgraph``."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ _PROVIDER_DEFAULTS = {
 
 
 def _literal_or_expression(value: Any, node_name: str, parameter: str) -> tuple[str, set[str]]:
-    """Render JSON literals and n8n expressions as source code."""
+    """Преобразовать JSON-литералы и expressions n8n в исходный Python-код."""
     if isinstance(value, str) and (value.startswith("=") or "{{" in value):
         expression = compile_langgraph_expression(
             value, node=node_name, parameter=parameter
@@ -74,7 +74,7 @@ def _literal_or_expression(value: Any, node_name: str, parameter: str) -> tuple[
 
 
 def _request_body(node: dict[str, Any]) -> tuple[str, set[str]]:
-    """Compile the HTTP node's JSON body into one Python expression."""
+    """Скомпилировать JSON-тело HTTP-узла в одно выражение Python."""
     name = str(node.get("name") or "HTTP Request")
     parameters = node.get("parameters", {})
     value = parameters.get("jsonBody")
@@ -102,7 +102,7 @@ def _request_body(node: dict[str, Any]) -> tuple[str, set[str]]:
 
 
 def _base_url(url: str, detection: AiRequestDetection) -> str:
-    """Return a configurable provider base URL without embedding URL secrets."""
+    """Получить настраиваемый базовый адрес провайдера без секретов в URL."""
     endpoint = detection.endpoint
     if endpoint is not None:
         if endpoint.provider == "gemini":
@@ -118,14 +118,14 @@ def _base_url(url: str, detection: AiRequestDetection) -> str:
 
 
 def _model_from_url(url: str) -> str:
-    """Extract a Gemini model identifier from its documented REST route."""
+    """Извлечь идентификатор модели Gemini из REST-пути."""
     path = urlsplit(url).path
     match = re.search(r"/models/([^/:]+):(?:generateContent|streamGenerateContent)$", path, re.I)
     return unquote(match.group(1)) if match else ""
 
 
 def _http_auth_defaults(node: dict[str, Any]) -> tuple[str, str, str]:
-    """Return an existing generated config key, header name, and header prefix."""
+    """Получить ключ настройки, имя заголовка и его префикс для config.py."""
     parameters = node.get("parameters", {})
     auth_kind = parameters.get("genericAuthType")
     fields = http_credential_fields(node)
@@ -160,7 +160,7 @@ def _http_auth_defaults(node: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def _header_code(node: dict[str, Any]) -> tuple[str, set[str]]:
-    """Generate evaluated request headers while keeping static secrets in config."""
+    """Сгенерировать заголовки запроса и вынести секреты в config.py."""
     parameters = node.get("parameters", {})
     entries = parameters.get("headerParameters", {}).get("parameters", [])
     secret_fields = http_secret_header_fields(node)
@@ -197,7 +197,7 @@ def _header_code(node: dict[str, Any]) -> tuple[str, set[str]]:
 
 
 def _safe_endpoint_url(url: str) -> str:
-    """Remove URL-embedded credentials before writing a custom endpoint to config."""
+    """Удалить credentials из URL перед записью собственного endpoint в config.py."""
     parsed = urlsplit(url)
     host = parsed.hostname or ""
     if ":" in host and not host.startswith("["):
@@ -221,7 +221,7 @@ def _safe_endpoint_url(url: str) -> str:
 def _generate_openai_compatible_endpoint_node(
     node: dict[str, Any], module_name: str
 ) -> tuple[str, str, set[str]]:
-    """Generate a LangGraph ChatModel that sends to a custom URL unchanged."""
+    """Сгенерировать модель LangGraph, отправляющую запрос на исходный URL."""
     node_name = str(node.get("name") or "HTTP Request")
     parameters = node.get("parameters", {})
     body_code, references = _request_body(node)
@@ -232,13 +232,13 @@ def _generate_openai_compatible_endpoint_node(
     default_key, default_header, default_prefix = _http_auth_defaults(node)
     api_key_default = default_key.removeprefix("config.") if default_key else "''"
     config_block = (
-        f"\n# Custom OpenAI-compatible endpoint settings for HTTP node {node_name!r}.\n"
+        f"\n# Параметры собственного OpenAI-совместимого endpoint HTTP-узла {node_name!r}.\n"
         f"{prefix}_ENDPOINT_URL = os.getenv({(prefix + '_ENDPOINT_URL')!r}, {endpoint!r})\n"
         f"{prefix}_API_KEY = os.getenv({(prefix + '_API_KEY')!r}, {api_key_default})\n"
         f"{prefix}_API_KEY_HEADER = os.getenv({(prefix + '_API_KEY_HEADER')!r}, {default_header!r})\n"
         f"{prefix}_API_KEY_PREFIX = os.getenv({(prefix + '_API_KEY_PREFIX')!r}, {default_prefix!r})\n"
     )
-    source = f'''"""Custom OpenAI-compatible LangGraph model generated from {node_name!r}."""
+    source = f'''"""Собственная OpenAI-совместимая модель LangGraph для HTTP-узла {node_name!r}."""
 
 from typing import Any
 
@@ -254,7 +254,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 
 class WorkflowEndpointChatModel(BaseChatModel):
-    """Call the workflow's original custom endpoint using an async LangGraph model."""
+    """Асинхронно обращаться к собственному endpoint исходного workflow."""
 
     model: str
     endpoint: str
@@ -267,7 +267,7 @@ class WorkflowEndpointChatModel(BaseChatModel):
         return "workflow-openai-compatible-endpoint"
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        raise NotImplementedError("This generated endpoint model supports async calls only")
+        raise NotImplementedError("Сгенерированная модель endpoint поддерживает только async-вызовы")
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         request_messages = []
@@ -281,7 +281,7 @@ class WorkflowEndpointChatModel(BaseChatModel):
             elif isinstance(message, AIMessage):
                 role = "assistant"
             else:
-                raise TypeError(f"Unsupported LangChain message type: {{type(message).__name__}}")
+                raise TypeError(f"Неподдерживаемый тип сообщения LangChain: {{type(message).__name__}}")
             entry = {{"role": role, "content": message.content}}
             if isinstance(message, ToolMessage):
                 entry["tool_call_id"] = message.tool_call_id
@@ -305,20 +305,20 @@ class WorkflowEndpointChatModel(BaseChatModel):
             content = response_body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise ValueError(
-                "Custom AI endpoint must return an OpenAI-compatible "
-                "choices[0].message.content response"
+                "Собственный AI endpoint должен вернуть OpenAI-совместимый "
+                "ответ choices[0].message.content"
             ) from exc
         message = AIMessage(content=content)
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
 async def run_node(items, results, execution):
-    """Run each compiled prompt through an agent using the original HTTP URL."""
+    """Отправить каждый собранный prompt агенту по исходному HTTP-адресу."""
     output = []
     for item in items:
         payload = {body_code}
         if not isinstance(payload, dict):
-            raise TypeError("AI Request body must evaluate to a JSON object")
+            raise TypeError("После вычисления AI-тело запроса должно быть JSON-объектом")
         {header_code}
         model_name = payload.get("model")
         if not isinstance(model_name, str) or not model_name:
@@ -354,7 +354,7 @@ async def run_node(items, results, execution):
         result = await agent.ainvoke({{"messages": _messages_from_payload(payload)}})
         messages = result.get("messages", [])
         if not messages:
-            raise ValueError("LangGraph agent не вернул ответ модели")
+            raise ValueError("Агент LangGraph не вернул ответ модели")
         text = _message_text(messages[-1])
         output.append({{"json": _response_body("openai_compatible", text, model_name)}})
     return output
@@ -368,7 +368,7 @@ def _provider_import(provider: str) -> str:
 
 
 def _model_constructor(provider: str, *, model: str, base_url: str, key: str, options: str) -> str:
-    """Generate a provider-specific chat model constructor."""
+    """Сгенерировать вызов конструктора chat-модели выбранного провайдера."""
     if provider in {"openai", "deepseek", "openrouter", "openai_compatible"}:
         return (
             f"ChatOpenAI(model={model}, base_url={base_url}, api_key={key}, "
@@ -390,7 +390,7 @@ def _model_constructor(provider: str, *, model: str, base_url: str, key: str, op
 
 
 def _message_helpers() -> str:
-    """Small generated helpers that normalize provider bodies to chat messages."""
+    """Сгенерировать небольшие функции преобразования тела провайдера в сообщения."""
     return '''
 def _messages_from_payload(payload):
     system = payload.get("system")
@@ -407,7 +407,7 @@ def _messages_from_payload(payload):
         result = []
         for message in messages:
             if not isinstance(message, dict) or "content" not in message:
-                raise ValueError("AI body contains a message without content")
+                raise ValueError("В AI-теле запроса у сообщения отсутствует поле content")
             role = message.get("role", "user")
             if role == "model":
                 role = "assistant"
@@ -421,7 +421,7 @@ def _messages_from_payload(payload):
         result = []
         for content in contents:
             if not isinstance(content, dict):
-                raise ValueError("Gemini contents must contain objects")
+                raise ValueError("Поле Gemini contents должно содержать объекты")
             role = "assistant" if content.get("role") == "model" else "user"
             parts = content.get("parts", [])
             text = "".join(part.get("text", "") for part in parts if isinstance(part, dict))
@@ -437,7 +437,7 @@ def _messages_from_payload(payload):
             result.append({"role": "system", "content": system})
         result.append({"role": "user", "content": prompt})
         return result
-    raise ValueError("AI body contains neither messages, contents, nor prompt")
+    raise ValueError("В AI-теле запроса нет messages, contents или prompt")
 
 
 def _message_text(message):
@@ -468,7 +468,7 @@ def _response_body(provider, text, model):
 def _generate_gemini_interactions_node(
     node: dict[str, Any], module_name: str
 ) -> tuple[str, str, set[str]]:
-    """Generate an async adapter for Gemini's model/managed-agent API."""
+    """Сгенерировать асинхронный адаптер для API моделей и агентов Gemini."""
     node_name = str(node.get("name") or "HTTP Request")
     body_code, references = _request_body(node)
     header_code, header_references = _header_code(node)
@@ -479,13 +479,13 @@ def _generate_gemini_interactions_node(
     default_key, default_header, default_prefix = _http_auth_defaults(node)
     api_key_default = default_key.removeprefix("config.") if default_key else "''"
     config_block = (
-        f"\n# Gemini Interactions settings for HTTP node {node_name!r}.\n"
+        f"\n# Параметры Gemini Interactions для HTTP-узла {node_name!r}.\n"
         f"{prefix}_API_KEY = os.getenv({(prefix + '_API_KEY')!r}, {api_key_default})\n"
         f"{prefix}_API_KEY_HEADER = os.getenv({(prefix + '_API_KEY_HEADER')!r}, {default_header!r})\n"
         f"{prefix}_API_KEY_PREFIX = os.getenv({(prefix + '_API_KEY_PREFIX')!r}, {default_prefix!r})\n"
         f"{prefix}_API_VERSION = os.getenv({(prefix + '_API_VERSION')!r}, {api_version!r})\n"
     )
-    source = f'''"""Gemini Interactions API adapter generated from {node_name!r}."""
+    source = f'''"""Адаптер Gemini Interactions API для HTTP-узла {node_name!r}."""
 
 from google import genai
 from google.genai import types
@@ -493,12 +493,12 @@ import config
 
 
 async def run_node(items, results, execution):
-    """Call a Gemini model or managed agent using the async SDK."""
+    """Вызвать модель или управляемого агента Gemini через async SDK."""
     output = []
     for item in items:
         payload = {body_code}
         if not isinstance(payload, dict):
-            raise TypeError("Gemini Interactions body must evaluate to a JSON object")
+            raise TypeError("После вычисления тело Gemini Interactions должно быть JSON-объектом")
         {header_code}
         api_key = config.{prefix}_API_KEY
         header_name = config.{prefix}_API_KEY_HEADER
@@ -557,7 +557,7 @@ def generate_http_agent_node(
     detection: AiRequestDetection,
     module_name: str,
 ) -> tuple[str, str, set[str]]:
-    """Replace a detected HTTP model call with a provider-backed LangGraph agent."""
+    """Заменить распознанный вызов модели HTTP-узла агентом LangGraph провайдера."""
     if not detection.is_ai or detection.provider not in _MODEL_PACKAGES:
         raise WorkflowError("Для HTTP-узла не удалось выбрать поддержку LangChain ChatModel")
     if detection.provider == "openai_compatible" and detection.endpoint is None:
@@ -573,11 +573,11 @@ def generate_http_agent_node(
     url = str(node.get("parameters", {}).get("url", ""))
     base_url = _base_url(url, detection) or _PROVIDER_DEFAULTS.get(provider, "")
     default_key, default_header, default_prefix = _http_auth_defaults(node)
-    # config.py is the source of these fields, so its defaults must refer to
-    # local names rather than importing itself as ``config``.
+    # Значения добавляются в config.py, поэтому значения по умолчанию должны
+    # ссылаться на переменные напрямую, а не импортировать config.py в себя.
     api_key_default = default_key.removeprefix("config.") if default_key else "''"
     config_block = (
-        f"\n# LangGraph model settings for HTTP node {node_name!r}.\n"
+        f"\n# Параметры модели LangGraph для HTTP-узла {node_name!r}.\n"
         f"{prefix}_BASE_URL = os.getenv({(prefix + '_BASE_URL')!r}, {base_url!r})\n"
         f"{prefix}_API_KEY = os.getenv({(prefix + '_API_KEY')!r}, {api_key_default})\n"
         f"{prefix}_API_KEY_HEADER = os.getenv({(prefix + '_API_KEY_HEADER')!r}, {default_header!r})\n"
@@ -597,7 +597,7 @@ def generate_http_agent_node(
     elif provider in {"gemini", "gemini_compatible"}:
         api_key_header = "x-goog-api-key"
 
-    source = f'''"""LangGraph agent generated from n8n HTTP Request {node_name!r}."""
+    source = f'''"""Агент LangGraph, созданный из HTTP Request n8n {node_name!r}."""
 
 import base64
 import json
@@ -610,12 +610,12 @@ from langchain.agents import create_agent
 
 
 async def run_node(items, results, execution):
-    """Run the model request through a provider-specific LangChain agent."""
+    """Выполнить запрос к модели через агент LangChain выбранного провайдера."""
     output = []
     for item in items:
         {{body_line}}
         if not isinstance(payload, dict):
-            raise TypeError("AI Request body must evaluate to a JSON object")
+            raise TypeError("После вычисления AI-тело запроса должно быть JSON-объектом")
         model_name = payload.get("model") or {_model_from_url(url)!r}
         if not isinstance(model_name, str) or not model_name:
             raise ValueError("Узел {node_name}: укажите поле model в JSON body")
@@ -643,7 +643,7 @@ async def run_node(items, results, execution):
         result = await agent.ainvoke({{"messages": _messages_from_payload(payload)}})
         messages = result.get("messages", [])
         if not messages:
-            raise ValueError("LangGraph agent не вернул ответ модели")
+            raise ValueError("Агент LangGraph не вернул ответ модели")
         text = _message_text(messages[-1])
         output.append({{"json": _response_body({provider!r}, text, model_name)}})
     return output
@@ -696,7 +696,7 @@ def _model_options(payload, provider):
 
 
 def _provider_for_model(node: dict[str, Any], model_config: dict[str, Any]) -> str:
-    """Choose a chat adapter from the endpoint or n8n model node type."""
+    """Выбрать адаптер chat-модели по endpoint или типу узла n8n."""
     node_type = str(node.get("type", "")).casefold()
     url = str(model_config.get("api_url", ""))
     for provider in ("openai", "deepseek", "openrouter", "anthropic", "gemini", "ollama"):
@@ -721,7 +721,7 @@ def generate_n8n_agent_node(
     module_name: str,
     config_prefix: str,
 ) -> tuple[str, set[str], str]:
-    """Create an n8n AI Agent backed by the model connected to it."""
+    """Сгенерировать AI Agent n8n с подключённой к нему моделью."""
     _, references, model_config = generate_ai_agent(
         agent_node, model_node, "run_node", config_prefix
     )
@@ -748,7 +748,7 @@ def generate_n8n_agent_node(
         key=f"config.{config_prefix}_API_KEY",
         options=f"_model_options(config.{config_prefix}_OPTIONS, {provider!r})",
     )
-    source = f'''"""LangGraph agent generated from n8n AI Agent {agent_node.get('name', '')!r}."""
+    source = f'''"""Агент LangGraph, созданный из узла n8n AI Agent {agent_node.get('name', '')!r}."""
 
 import config
 import re
@@ -757,7 +757,7 @@ from {module} import {_MODEL_CLASSES[provider][1]}
 
 
 def _base_url(api_url, provider):
-    """Convert the stored completion URL into the provider's base URL."""
+    """Преобразовать сохранённый URL вызова в базовый адрес провайдера."""
     if not api_url:
         return {{
             "openai": "https://api.openai.com/v1",
@@ -787,7 +787,7 @@ def _base_url(api_url, provider):
 
 
 def _model_options(values, provider):
-    """Keep model settings that the selected adapter accepts."""
+    """Оставить только настройки, которые принимает выбранный адаптер модели."""
     allowed = {{
         "openai": {{"temperature", "max_tokens", "top_p", "stop", "frequency_penalty", "presence_penalty"}},
         "deepseek": {{"temperature", "max_tokens", "top_p", "stop", "frequency_penalty", "presence_penalty"}},
@@ -810,7 +810,7 @@ def _model_options(values, provider):
 
 
 async def run_node(items, results, execution):
-    """Run the n8n prompt through a compiled LangGraph agent."""
+    """Выполнить prompt n8n через скомпилированный агент LangGraph."""
     api_key = config.{config_prefix}_API_KEY
     if {provider!r} != "ollama" and not api_key:
         raise ValueError("Заполните {config_prefix}_API_KEY в config.py или переменную окружения")
@@ -831,7 +831,7 @@ async def run_node(items, results, execution):
         result = await agent.ainvoke({{"messages": messages}})
         returned_messages = result.get("messages", [])
         if not returned_messages:
-            raise ValueError("LangGraph agent не вернул ответ модели")
+            raise ValueError("Агент LangGraph не вернул ответ модели")
         output.append({{"json": {{"output": _message_text(returned_messages[-1])}}}})
     return output
 '''

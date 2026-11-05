@@ -1,4 +1,4 @@
-"""Tests for provider-backed agents generated in opt-in LangGraph mode."""
+"""Проверки агентов провайдеров, создаваемых в режиме LangGraph."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def _http_node(
 
 
 def _load_generated_module(source: str, monkeypatch: pytest.MonkeyPatch):
-    """Execute generated source with stand-ins for config and LangChain APIs."""
+    """Выполнить сгенерированный код с подменами config и API LangChain."""
     captured: dict[str, object] = {}
 
     class FakeChatOpenAI:
@@ -123,7 +123,7 @@ def test_langgraph_mode_generates_provider_agent_from_openai_chat_body(
     assert "langgraph>=1.0" in files["requirements.txt"]
     assert "httpx>=0.27" not in files["requirements.txt"]
     assert "http_requests/__init__.py" not in files
-    assert "OpenAI/DeepSeek `/v1/chat/completions`" in files["README.md"]
+    assert "OpenAI и DeepSeek `/v1/chat/completions`" in files["README.md"]
 
     module, captured = _load_generated_module(files["ai_nodes/llm_request.py"], monkeypatch)
     module.config.LANGGRAPH_HTTP_LLM_REQUEST_API_KEY = "test-key"

@@ -19,7 +19,7 @@ from n8n_transcriper.generator import generate_project
 
 
 def adapt_async_client(client_factory):
-    """Adapt synchronous test doubles to the generated AsyncClient interface."""
+    """Адаптировать синхронные подмены клиента к интерфейсу AsyncClient."""
     class AsyncClientAdapter:
         def __init__(self, **options):
             self.client = client_factory(**options)

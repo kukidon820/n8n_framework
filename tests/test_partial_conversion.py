@@ -1,4 +1,4 @@
-"""Best-effort conversion keeps translatable nodes and documents omissions."""
+"""Проверки частичной конвертации и описания пропущенных узлов."""
 
 from n8n_transcriper.generator import generate_project
 

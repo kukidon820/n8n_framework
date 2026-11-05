@@ -1,7 +1,7 @@
-"""Render a generated project's entry point on top of LangGraph.
+"""Сгенерировать точку входа проекта, использующую LangGraph.
 
-The default converter keeps its current direct-call runner. This renderer is
-used only when the caller explicitly enables LangGraph mode.
+Обычный конвертер сохраняет runner с прямыми вызовами. Этот генератор
+используется только при явном включении режима LangGraph.
 """
 
 from __future__ import annotations
@@ -49,13 +49,13 @@ def _is_trigger(node: dict[str, Any]) -> bool:
 
 
 def _python_alias(index: int) -> str:
-    """Return a deterministic local name for an imported node function."""
+    """Сформировать стабильное локальное имя для импортированной функции узла."""
     alias = f"_run_step_{index}"
     return alias if alias.isidentifier() and not keyword.iskeyword(alias) else f"_node_{index}"
 
 
 def _folders(workflow_nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
-    """Find generated module folders, including Gmail's specialized sender."""
+    """Определить каталоги модулей, включая отдельный отправитель Gmail."""
     from n8n_transcriper.converters.smtp import is_gmail_send_node
 
     result = {}
@@ -71,7 +71,7 @@ def _folders(workflow_nodes: dict[str, dict[str, Any]]) -> dict[str, str]:
 
 
 def _runtime_source() -> str:
-    """Return small helpers embedded in generated main.py."""
+    """Вернуть вспомогательные функции для включения в generated main.py."""
     source = '''
 def _flatten_ports(outputs):
     return [item for port in outputs for item in port]
@@ -276,11 +276,11 @@ def render_langgraph_main(
     loop_info: dict[str, Any] | None = None,
     agent_nodes: set[str] | None = None,
 ) -> str:
-    """Generate ``main.py`` with every supported node represented in LangGraph.
+    """Сгенерировать ``main.py`` с поддерживаемыми узлами в виде шагов LangGraph.
 
-    Acyclic workflows are represented as one LangGraph node per n8n node. The
-    body of a Loop Over Items node becomes a nested graph, while the outer graph
-    handles nodes before and after the loop.
+    Для ациклического workflow создаётся шаг графа на каждый узел n8n. Тело
+    Loop Over Items становится вложенным графом, а внешний граф запускает
+    узлы до и после цикла.
     """
     nodes = {node["name"]: node for node in workflow["nodes"]}
     agent_nodes = agent_nodes or set()
@@ -398,7 +398,7 @@ def render_langgraph_main(
         terminal_expr = f"_clean_items({terminal_expr})"
 
     source = (
-        '"""Manual entry point for a workflow executed by LangGraph."""\n\n'
+        '"""Точка ручного запуска workflow через LangGraph."""\n\n'
         "import asyncio\nimport logging\nimport sys\nimport uuid\n"
         "from copy import deepcopy\nfrom typing import Any, TypedDict\n\n"
         "from langgraph.graph import END, START, StateGraph\n\n"
@@ -625,7 +625,7 @@ def _render_loop_graph(
 
 
 def _linked_item_nodes(value: Any) -> set[str]:
-    """Find references that need n8n paired-item lineage in the generated graph."""
+    """Найти ссылки, которым нужна связь paired items в generated-графе."""
     if isinstance(value, str):
         if not value.startswith("=") and "{{" not in value:
             return set()

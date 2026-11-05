@@ -503,7 +503,7 @@ def generate_data_table_node(
             source.append(
                 '            if not isinstance(limit_value, int) or isinstance(limit_value, bool) or limit_value < 1:'
             )
-            source.append('                raise ValueError("Data Table limit должен быть целым числом не меньше 1")')
+            source.append('                raise ValueError("Параметр limit узла Data Table должен быть целым числом не меньше 1")')
             source.append("            values.append(limit_value)")
             source.append('            query = f"SELECT * FROM {table}{where_sql}{order_sql} LIMIT $" + str(len(values))')
             source.append("            rows = await conn.fetch(query, *values)")

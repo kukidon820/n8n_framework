@@ -555,7 +555,7 @@ def _prepare_partial_workflow(
 def _append_skipped_part_notes(
     files: dict[str, str], skipped_parts: list[tuple[str, str, str]]
 ) -> None:
-    """Add explicit source comments and documentation for every omitted n8n part."""
+    """Добавить комментарии и пояснения для каждой пропущенной части n8n."""
     if not skipped_parts:
         return
 
@@ -596,7 +596,7 @@ def _append_skipped_part_notes(
 
 
 def _write_project_files(files: dict[str, str], output: Path | None) -> None:
-    """Write generated project files after all partial-conversion notes are added."""
+    """Записать файлы проекта после добавления всех замечаний о частичной конвертации."""
     if output is None:
         return
     output = Path(output)
@@ -1252,7 +1252,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             append_merge = kind == "n8n-nodes-base.merge" and merge_params.get("mode", "append") == "append"
             ready = ("any(merge_inputs)" if include_unpaired or outer_join or append_merge else "all(merge_inputs)") if kind == "n8n-nodes-base.merge" else "items"
             calls.extend([f"    {aliases[name]} = [[] for _ in range({count})]", f"    if {ready}:",
-                          f"        logging.info({(name + ': started')!r})"])
+                          f"        logging.info({(name + ': начат')!r})"])
             if node.get("executeOnce", False):
                 calls.append("        items = items[:1]")
             if is_condition:
@@ -1293,7 +1293,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     if name in loop_body_nodes else "items"
                 )
                 calls.extend([f"        {aliases[name]}[0] = items", f"        results[{name!r}] = {stored_items}"])
-            calls.append(f"        logging.info({(name + ': completed')!r})")
+            calls.append(f"        logging.info({(name + ': завершён')!r})")
             if is_condition:
                 flattened = f"[item for output in {aliases[name]} for item in output]"
                 stored_outputs = (
@@ -1302,7 +1302,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 )
                 calls.append(f"    results[{name!r}] = {stored_outputs}")
         else:
-            calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': started')!r})"])
+            calls.extend(["    if not items:", "        return []", f"    logging.info({(name + ': начат')!r})"])
             if node.get("executeOnce", False):
                 calls.append("    items = items[:1]")
             if linked_items:
@@ -1323,7 +1323,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 f"{loop_state_name}.record_result({name!r}, items)"
                 if name in loop_body_nodes else "items"
             )
-            calls.extend([f"    results[{name!r}] = {stored_items}", f"    logging.info({(name + ': completed')!r})"])
+            calls.extend([f"    results[{name!r}] = {stored_items}", f"    logging.info({(name + ': завершён')!r})"])
         converted += 1
         completed.add(name)
         if loop_info and name in loop_info["body"] and name == loop_body_order[-1]:
@@ -1502,11 +1502,13 @@ def _clean_items(items):
     )
     files["run.bat"] = (
         "@echo off\n"
+        "chcp 65001 >nul\n"
         "setlocal\n"
+        "set PYTHONUTF8=1\n"
         'cd /d "%~dp0"\n'
         "uv run python main.py\n"
         'set "workflow_exit_code=%ERRORLEVEL%"\n'
-        'if not "%workflow_exit_code%"=="0" echo Workflow failed with exit code %workflow_exit_code%.\n'
+        'if not "%workflow_exit_code%"=="0" echo Ошибка выполнения workflow. Код завершения: %workflow_exit_code%.\n'
         "echo.\n"
         "pause\n"
         "exit /b %workflow_exit_code%\n"
@@ -1727,11 +1729,11 @@ def _clean_items(items):
 
 
 def _empty_partial_project() -> dict[str, str]:
-    """Create normal project files when every executable workflow node was skipped."""
+    """Создать структуру проекта, если пропущены все исполняемые узлы."""
     sample = {
         "nodes": [{
             "id": "partial-conversion-placeholder",
-            "name": "Partial conversion placeholder",
+            "name": "Заглушка частичной конвертации",
             "type": "n8n-nodes-base.noOp",
             "parameters": {},
         }],
@@ -1773,7 +1775,7 @@ if __name__ == "__main__":
 
 
 def _node_named_in_error(workflow: dict[str, Any], error: str) -> str | None:
-    """Find a node explicitly identified in a conversion diagnostic."""
+    """Найти узел, имя которого указано в диагностике конвертации."""
     nodes = [
         node for node in workflow.get("nodes", [])
         if isinstance(node, dict) and isinstance(node.get("name"), str)
@@ -1788,7 +1790,7 @@ def _node_named_in_error(workflow: dict[str, Any], error: str) -> str | None:
 
 
 def _is_trigger_node(node: dict[str, Any]) -> bool:
-    """Return whether n8n intentionally excludes the node from execution."""
+    """Определить, исключает ли n8n этот узел из исполнения как триггер."""
     kind = node.get("type", "")
     short_name = kind.rsplit(".", 1)[-1].lower() if isinstance(kind, str) else ""
     return short_name.endswith("trigger") or kind == "n8n-nodes-base.webhook"
@@ -1800,7 +1802,7 @@ def _update_partial_conversion_report(
     original_count: int,
     skipped_parts: list[tuple[str, str, str]],
 ) -> None:
-    """Make report counts refer to the source workflow, not its filtered graph."""
+    """Пересчитать итоговый отчёт по исходному workflow, включая пропущенные узлы."""
     report = files.get("conversion_report.md", "")
     summary = re.search(
         r"Узлов: \d+\. Преобразовано: (\d+)\. Моделей подключено: (\d+)\. Триггеров пропущено: (\d+)\.",
@@ -1833,12 +1835,12 @@ def generate_project(
     *,
     langgraph: bool = False,
 ) -> dict[str, str]:
-    """Generate a project while recording and omitting untranslatable workflow parts.
+    """Создать проект, отметить и пропустить части workflow, которые нельзя перенести.
 
-    When a node-specific conversion error occurs, that node is removed and the
-    remaining graph is compiled again. If a graph-level error has no node name,
-    the generator tries omitting each remaining node in turn. It still returns
-    a runnable project shell and an explicit report if no subgraph can be built.
+    При ошибке конвертации узла он исключается, а оставшийся граф собирается
+    повторно. Если ошибка относится ко всему графу и имя узла неизвестно,
+    генератор по очереди проверяет исключение оставшихся узлов. Даже если
+    собрать подграф не удалось, возвращаются каркас проекта и подробный отчёт.
     """
     original = copy.deepcopy(workflow)
     original_nodes = original.get("nodes", []) if isinstance(original, dict) else []
@@ -1874,8 +1876,8 @@ def generate_project(
                 )
                 continue
 
-            # A graph-level diagnostic may not identify its source node.
-            # Find a single omission that makes the rest of the graph compilable.
+            # Диагностика графа может не указывать конкретный исходный узел.
+            # Пробуем исключить один узел, чтобы собрать оставшуюся часть графа.
             for node in candidate.get("nodes", []):
                 if not isinstance(node, dict) or not isinstance(node.get("name"), str):
                     continue
@@ -1908,8 +1910,8 @@ def generate_project(
             if files is not None:
                 break
 
-            # No single node can repair the graph. Keep the conversion result
-            # usable and document why the remaining graph was omitted.
+            # Исключение одного узла не исправило граф. Сохраняем результат
+            # конвертации и объясняем, почему остальная часть пропущена.
             for node in candidate.get("nodes", []):
                 if isinstance(node, dict) and isinstance(node.get("name"), str):
                     forced_skips.setdefault(
@@ -1932,12 +1934,12 @@ def generate_project(
 
 
 def _prepare_langgraph_conversion_input(workflow: dict[str, Any]) -> dict[str, Any]:
-    """Temporarily simplify detected AI HTTP settings for legacy validation.
+    """Временно упростить настройки найденного AI HTTP-запроса для общей проверки.
 
-    The ordinary HTTP generator remains responsible for the rest of the
-    workflow, but it must not reject an AI node because its JSON expression is
-    newer than the default converter's expression subset. The original node is
-    passed to the LangGraph agent generator immediately after this pass.
+    Обычный HTTP-генератор продолжает обрабатывать остальные запросы workflow.
+    Выражение JSON-тела AI-узла не должно отклоняться только потому, что оно
+    выходит за пределы подмножества выражений обычного конвертера. После общей
+    проверки исходный узел передаётся генератору агента LangGraph.
     """
     from n8n_transcriper.langgraph_mode.detection import detect_ai_request
 
@@ -1983,7 +1985,7 @@ def _prepare_langgraph_conversion_input(workflow: dict[str, Any]) -> dict[str, A
             parameters["sendHeaders"] = True
             parameters["headerParameters"] = {"parameters": safe_entries}
         node["parameters"] = parameters
-        # The provider-backed adapter applies these retry settings itself.
+        # Повторы для запроса к провайдеру выполняет сгенерированный адаптер.
         node["retryOnFail"] = False
     return candidate
 
@@ -1991,7 +1993,7 @@ def _prepare_langgraph_conversion_input(workflow: dict[str, Any]) -> dict[str, A
 def _apply_langgraph_mode(
     workflow: dict[str, Any], files: dict[str, str]
 ) -> dict[str, str]:
-    """Add the opt-in LangGraph runner without changing default generation."""
+    """Добавить runner LangGraph, не меняя генерацию в обычном режиме."""
     from n8n_transcriper.langgraph_mode.agent_generation import (
         generate_http_agent_node,
         generate_n8n_agent_node,
@@ -2108,25 +2110,25 @@ def _apply_langgraph_mode(
     files["README.md"] = (
         readme
         + "\n## LangGraph\n\n"
-        + "\u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u0444\u043b\u0430\u0433 `--langgraph`, \u0447\u0442\u043e\u0431\u044b \u0437\u0430\u043f\u0443\u0441\u043a\u0430\u0442\u044c workflow \u0447\u0435\u0440\u0435\u0437 LangGraph. "
-        + "\u041a\u0430\u0436\u0434\u044b\u0439 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u044b\u0439 \u0443\u0437\u0435\u043b \u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u0441\u044f \u043e\u0442\u0434\u0435\u043b\u044c\u043d\u044b\u043c \u0448\u0430\u0433\u043e\u043c \u0433\u0440\u0430\u0444\u0430. \u0422\u0435\u043b\u043e `Loop Over Items` "
-        + "\u0441\u043e\u0437\u0434\u0430\u0451\u0442\u0441\u044f \u043a\u0430\u043a \u0432\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0439 \u0433\u0440\u0430\u0444, \u0430 \u0443\u0437\u043b\u044b \u0434\u043e \u0438 \u043f\u043e\u0441\u043b\u0435 \u0446\u0438\u043a\u043b\u0430 \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u0448\u0430\u0433\u0430\u043c\u0438 \u043e\u0441\u043d\u043e\u0432\u043d\u043e\u0433\u043e \u0433\u0440\u0430\u0444\u0430.\n"
+        + "Используйте флаг `--langgraph`, чтобы запускать workflow через LangGraph. "
+        + "Каждый поддерживаемый узел становится отдельным шагом графа. Тело `Loop Over Items` "
+        + "создаётся как вложенный граф, а узлы до и после цикла остаются шагами основного графа.\n"
     )
     if ai_providers:
         provider_names = ", ".join(f"`{provider}`" for provider in sorted(ai_providers))
         files["README.md"] += (
-            "\n### AI-\u0443\u0437\u043b\u044b \u0432 LangGraph\n\n"
-            "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 HTTP-\u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432 \u043d\u0430 AI \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u0440\u0438 `--langgraph`. \u0414\u0435\u0442\u0435\u043a\u0442\u043e\u0440 \u0443\u0447\u0438\u0442\u044b\u0432\u0430\u0435\u0442 host/endpoint \u0438 \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0443 JSON body; \u043e\u0434\u043d\u043e\u0433\u043e \u043f\u043e\u043b\u044f `messages` \u0431\u0435\u0437 \u043c\u043e\u0434\u0435\u043b\u0438, \u0440\u043e\u043b\u0435\u0439 \u0438 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438 \u043d\u0435\u0434\u043e\u0441\u0442\u0430\u0442\u043e\u0447\u043d\u043e.\n\n"
-            "\u0418\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0435 endpoint-\u0444\u043e\u0440\u043c\u044b: OpenAI/DeepSeek `/v1/chat/completions`, OpenRouter `/api/v1/chat/completions`, Anthropic `/v1/messages`, Gemini `:generateContent` \u0438 `/v1/interactions`, Ollama `/api/chat` \u0438 `/api/generate`. \u0414\u043b\u044f \u0441\u0432\u043e\u0438\u0445 URL \u043d\u0443\u0436\u0435\u043d\u0430 \u043f\u043e\u043b\u043d\u0430\u044f \u0441\u0442\u0440\u0443\u043a\u0442\u0443\u0440\u0430 \u043c\u043e\u0434\u0435\u043b\u0438, role-based messages \u0438 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u0433\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u0438.\n\n"
+            "\n### AI-узлы в LangGraph\n\n"
+            "Распознавание AI-вызовов в HTTP Request включается только с `--langgraph`. Детектор учитывает адрес сервера, путь endpoint и структуру JSON-тела; одного поля `messages` без модели, ролей и параметров генерации недостаточно.\n\n"
+            "Известные адреса API: OpenAI и DeepSeek `/v1/chat/completions`, OpenRouter `/api/v1/chat/completions`, Anthropic `/v1/messages`, Gemini `:generateContent` и `/v1/interactions`, Ollama `/api/chat` и `/api/generate`. Для собственного адреса требуется распознаваемая структура модели, например `model`, сообщения с полями `role` и `content`, а также параметры генерации.\n\n"
             "Для внутренних endpoint с распознанной OpenAI-compatible структурой используется точный URL узла (без секретных query-параметров); ответ API должен содержать choices[0].message.content.\n\n"
-            f"\u0412 \u044d\u0442\u043e\u043c workflow \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u044b \u043f\u0440\u043e\u0432\u0430\u0439\u0434\u0435\u0440\u044b: {provider_names}.\n\n"
-            "\u041e\u0431\u044b\u0447\u043d\u044b\u0435 HTTP AI-\u0437\u0430\u043f\u0440\u043e\u0441\u044b \u0438 n8n AI Agent \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u044e\u0442\u0441\u044f \u0447\u0435\u0440\u0435\u0437 `create_agent` \u0438 provider ChatModel. Gemini Interactions API \u0432\u044b\u0437\u044b\u0432\u0430\u0435\u0442\u0441\u044f \u0430\u0441\u0438\u043d\u0445\u0440\u043e\u043d\u043d\u044b\u043c Google GenAI SDK, \u0447\u0442\u043e\u0431\u044b \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b \u0443\u0434\u0430\u043b\u0451\u043d\u043d\u043e\u0433\u043e \u0430\u0433\u0435\u043d\u0442\u0430. \u0421\u0435\u043a\u0440\u0435\u0442\u044b \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u0432 `config.py`/env.\n"
+            f"В этом workflow обнаружены провайдеры: {provider_names}.\n\n"
+            "Распознанные HTTP AI-запросы с поддерживаемой chat-моделью и n8n AI Agent используют `create_agent` с моделью выбранного провайдера. Gemini Interactions вызывается отдельно через асинхронный Google GenAI SDK, чтобы сохранить настройки удалённого агента. Секреты задаются в `config.py` или переменных окружения.\n"
         )
     return files
 
 
 def _langchain_package(provider: str | None) -> str:
-    """Return the provider package name without the shared ``langchain-`` prefix."""
+    """Вернуть имя пакета провайдера без общего префикса ``langchain-``."""
     packages = {
         "openai": "openai",
         "deepseek": "openai",
@@ -2143,7 +2145,7 @@ def _langchain_package(provider: str | None) -> str:
 
 
 def _langchain_provider_for_model(node: dict[str, Any]) -> str:
-    """Name the provider implied by an n8n chat-model node type."""
+    """Определить провайдера по типу узла chat-модели n8n."""
     kind = str(node.get("type", "")).casefold()
     for provider in ("openrouter", "deepseek", "anthropic", "gemini", "google", "ollama", "openai"):
         if provider in kind:
