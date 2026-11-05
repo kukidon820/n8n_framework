@@ -268,7 +268,7 @@ def test_generator_adds_async_runner_postgres_config_and_table_mapping():
     assert "asyncpg>=0.29" in files["requirements.txt"]
     assert "async def run_async(input_data=None)" in files["main.py"]
     assert "asyncio.run(run_async(input_data))" in files["main.py"]
-    assert "await customers_get(items, results, execution)" in files["main.py"]
+    assert "lambda: customers_get(items, results, execution)" in files["main.py"]
     assert "POSTGRES_PASSWORD" in files["config.py"]
     assert "DATA_TABLES = {'Customers': 'public.n8n_customers'}" in files["config.py"]
     assert "SELECT * FROM" in files["database/customers_get.py"]
@@ -287,7 +287,7 @@ def test_unverified_datatable_version_keeps_async_fallback_signature():
     assert "async def run_node" in files["database/customers_get.py"]
     assert "n8n_manual_parameters=None" in files["database/customers_get.py"]
     assert "TODO: проверить" in files["database/customers_get.py"]
-    assert "await customers_get(items, results, execution, n8n_manual_parameters=" in files["main.py"]
+    assert "lambda: customers_get(items, results, execution, n8n_manual_parameters=" in files["main.py"]
 
 
 def test_unsupported_dry_run_and_table_resource_are_reported():

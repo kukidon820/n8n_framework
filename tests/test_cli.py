@@ -11,6 +11,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from n8n_transcriper.cli import app
+from n8n_transcriper.reader import WorkflowError
 
 
 def test_help_is_in_russian():
@@ -83,6 +84,11 @@ def test_convert_and_validate_offer_opt_in_langgraph_mode(tmp_path, monkeypatch)
     )
 
     assert result.exit_code == 0, result.output
+    assert "[1/4] Читаю workflow" in result.output
+    assert "[2/4] Генерирую проект (LangGraph)" in result.output
+    assert "Результат: преобразовано узлов 1 из 1" in result.output
+    assert "[3/4] Создаю uv.lock" in result.output
+    assert "[4/4] Конвертация завершена" in result.output
     assert "StateGraph" in (output / "main.py").read_text(encoding="utf-8")
     assert "langgraph>=1.0" in (output / "requirements.txt").read_text(encoding="utf-8")
 
@@ -90,6 +96,51 @@ def test_convert_and_validate_offer_opt_in_langgraph_mode(tmp_path, monkeypatch)
 
     assert validation.exit_code == 0, validation.output
     assert validation.output
+
+
+def test_convert_reports_the_stage_when_dependency_locking_fails(tmp_path, monkeypatch):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(json.dumps({
+        "nodes": [{
+            "id": "1", "name": "Build", "type": "n8n-nodes-base.code",
+            "parameters": {"language": "pythonNative", "pythonCode": "return _items"},
+        }],
+        "connections": {},
+    }), encoding="utf-8")
+
+    def fail_lock(_output):
+        raise WorkflowError("uv.lock тестовая ошибка")
+
+    monkeypatch.setattr("n8n_transcriper.cli._create_uv_lock", fail_lock)
+    result = CliRunner().invoke(
+        app,
+        ["convert", str(workflow), "--out", str(tmp_path / "generated")],
+    )
+
+    assert result.exit_code == 1
+    assert "[ОШИБКА] Этап «создание файла зависимостей uv.lock»" in result.output
+    assert "uv.lock тестовая ошибка" in result.output
+
+
+def test_convert_names_nodes_that_need_manual_implementation(tmp_path, monkeypatch):
+    workflow = tmp_path / "workflow.json"
+    workflow.write_text(json.dumps({
+        "nodes": [{
+            "id": "unknown-1", "name": "Новый узел", "type": "custom.unknown",
+            "parameters": {},
+        }],
+        "connections": {},
+    }), encoding="utf-8")
+    monkeypatch.setattr("n8n_transcriper.cli._create_uv_lock", lambda _output: None)
+
+    result = CliRunner().invoke(
+        app,
+        ["convert", str(workflow), "--out", str(tmp_path / "generated")],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Предупреждение: узел «Новый узел»" in result.output
+    assert "conversion_report.md" in result.output
 
 
 def test_validate_reports_node_and_stage_for_unsupported_node(tmp_path):
