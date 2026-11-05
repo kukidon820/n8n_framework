@@ -1,8 +1,8 @@
-"""Conservative detection of AI model calls inside HTTP Request nodes.
+"""Осторожное распознавание AI-вызовов среди узлов HTTP Request.
 
-This module is called only by the opt-in ``--langgraph`` conversion path. It
-combines provider endpoint evidence with the JSON body's shape; a message list
-alone is not treated as proof of an LLM request.
+Модуль вызывается только при явном флаге ``--langgraph``. Он сопоставляет адрес
+провайдера со структурой JSON-тела; одного списка сообщений недостаточно,
+чтобы признать запрос обращением к языковой модели.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ _GENERATION_FIELDS = frozenset(
 
 @dataclass(frozen=True)
 class AiRequestDetection:
-    """A provider and protocol guess, with evidence suitable for diagnostics."""
+    """Результат определения провайдера и протокола с данными для диагностики."""
 
     is_ai: bool
     provider: str | None
@@ -64,7 +64,7 @@ class _BodyShape:
 
 
 def _static_value(node: ast.AST) -> Any:
-    """Read only literal structure from compiled expressions; never execute it."""
+    """Прочитать только структуру литералов; не исполнять expression."""
     if isinstance(node, ast.Constant):
         return node.value
     if isinstance(node, (ast.List, ast.Tuple)):
@@ -84,7 +84,7 @@ def _static_value(node: ast.AST) -> Any:
 
 
 def _expression_body(value: str, node_name: str) -> Any:
-    """Parse a literal body or its static object shape without evaluating JS."""
+    """Разобрать литеральное тело или его структуру, не исполняя JavaScript."""
     try:
         parsed_json = json.loads(value)
     except (json.JSONDecodeError, TypeError):
@@ -103,7 +103,7 @@ def _expression_body(value: str, node_name: str) -> Any:
 
 
 def _http_body(parameters: dict[str, Any], node_name: str) -> Any:
-    """Extract the body shape from n8n's JSON, key/value, or raw body fields."""
+    """Извлечь структуру тела из JSON, пар ключ/значение или raw body n8n."""
     if parameters.get("contentType", "json") == "json":
         json_body = parameters.get("jsonBody")
         if isinstance(json_body, dict):
@@ -196,13 +196,13 @@ def _body_evidence(shape: _BodyShape) -> tuple[str, ...]:
 
 
 def detect_ai_request(node: dict[str, Any]) -> AiRequestDetection:
-    """Classify an HTTP Request as an AI call only when evidence is sufficient.
+    """Распознать HTTP Request как AI-вызов только при достаточных признаках.
 
-    Known provider endpoints need a compatible body shape. Unknown endpoints
-    need a stronger body signature: model plus chat-role messages (or a
-    text-generation prompt) and at least one generation option. This prevents
-    Slack, Telegram, and similar APIs from matching merely because they carry
-    messages.
+    Для известного endpoint требуется совместимая структура тела. Для
+    неизвестного адреса нужна более строгая сигнатура: модель и сообщения
+    с ролями либо prompt для генерации текста, а также хотя бы один параметр
+    генерации. Это не позволяет принять Slack, Telegram и похожие API за
+    вызов модели только из-за наличия массива сообщений.
     """
     parameters = node.get("parameters", {})
     if not isinstance(parameters, dict):
@@ -272,9 +272,8 @@ def detect_ai_request(node: dict[str, Any]) -> AiRequestDetection:
             tuple(sorted(shape.fields)),
         )
 
-    # An internal or self-hosted endpoint can still be OpenAI-compatible. The
-    # URL alone is not enough: require a model, role-based chat messages, and a
-    # generation setting before selecting that adapter.
+    # Внутренний или собственный endpoint тоже может быть совместим с OpenAI.
+    # Одного URL мало: требуем модель, сообщения с ролями и параметр генерации.
     if chat_shape and shape.has_generation_options:
         evidence.append("body:openai-compatible-signature")
         return AiRequestDetection(

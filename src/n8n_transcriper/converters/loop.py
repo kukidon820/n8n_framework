@@ -159,7 +159,7 @@ class Loop:
         вручную, если они отличаются от известного поведения.
         """
         if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size < 1:
-            raise ValueError("batch_size должен быть целым числом не меньше 1")
+            raise ValueError("Размер пакета batch_size должен быть целым числом не меньше 1")
         if not isinstance(reset, bool):
             raise TypeError("reset должен быть логическим значением")
         if not isinstance(execute_once, bool):
@@ -167,13 +167,13 @@ class Loop:
         if not isinstance(retry_on_fail, bool):
             raise TypeError("retry_on_fail должен быть логическим значением")
         if not isinstance(max_tries, int) or isinstance(max_tries, bool) or max_tries < 1:
-            raise ValueError("max_tries должен быть целым числом не меньше 1")
+            raise ValueError("Число попыток max_tries должно быть целым числом не меньше 1")
         if (
             not isinstance(wait_between_tries, (int, float))
             or isinstance(wait_between_tries, bool)
             or wait_between_tries < 0
         ):
-            raise ValueError("wait_between_tries должен быть числом не меньше 0")
+            raise ValueError("Интервал wait_between_tries должен быть числом не меньше 0")
         unsupported_paths = (
             n8n_manual_parameters.get("unsupported_parameter_paths", ())
             if isinstance(n8n_manual_parameters, dict)

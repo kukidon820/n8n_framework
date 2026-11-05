@@ -1,4 +1,4 @@
-"""Expression parsing helpers used only by opt-in LangGraph AI conversion."""
+"""Вспомогательные средства разбора expressions для режима LangGraph."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ _CLOSING = {")": "(", "]": "[", "}": "{"}
 
 
 def _template_spans(value: str) -> list[tuple[int, int, str]]:
-    """Find ``{{ ... }}`` blocks without mistaking object braces for delimiters."""
+    """Найти блоки ``{{ ... }}``, не принимая скобки объекта за границы шаблона."""
     spans: list[tuple[int, int, str]] = []
     position = 0
     while position < len(value):
@@ -52,11 +52,11 @@ def _template_spans(value: str) -> list[tuple[int, int, str]]:
 def compile_langgraph_expression(
     value: str, *, node: str, parameter: str
 ) -> Expression:
-    """Compile n8n expressions with nested object literals for LangGraph AI.
+    """Скомпилировать expressions n8n с вложенными объектами для AI-узлов LangGraph.
 
-    The shared converter parser remains untouched, so default generation keeps
-    its existing behavior. This adapter handles nested ``}}`` tokens while
-    compiling AI request bodies such as Gemini contents and structured prompts.
+    Общий парсер конвертера не меняется, поэтому обычный режим сохраняет
+    прежнее поведение. Этот адаптер обрабатывает вложенные ``}}`` при разборе
+    AI-тел запросов, например содержимого Gemini и структурированных prompt.
     """
     try:
         text = value[1:] if value.startswith("=") else value

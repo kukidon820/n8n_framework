@@ -132,9 +132,9 @@ def generate_wait_node(node: dict[str, Any], function_name: str) -> tuple[str, s
         wait_code = (
             f"    amount = {amount_code}\n"
             "    if isinstance(amount, bool) or not isinstance(amount, (int, float)):\n"
-            '        raise TypeError("Wait amount должен быть числом")\n'
+            '        raise TypeError("Значение amount узла Wait должно быть числом")\n'
             "    if not math.isfinite(float(amount)) or amount < 0:\n"
-            '        raise ValueError("Wait amount должен быть конечным числом не меньше 0")\n'
+            '        raise ValueError("Значение amount узла Wait должно быть конечным числом не меньше 0")\n'
             f"    await asyncio.sleep(float(amount) * {_TIME_UNITS[unit]})\n"
         )
     else:

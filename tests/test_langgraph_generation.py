@@ -1,4 +1,4 @@
-"""Generation and execution tests for the opt-in LangGraph runner."""
+"""Проверки генерации и запуска runner на LangGraph."""
 
 from __future__ import annotations
 
