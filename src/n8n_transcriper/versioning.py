@@ -140,7 +140,7 @@ def compatible_node(node: dict[str, Any]) -> dict[str, Any]:
     if info is not None:
         compatible["typeVersion"] = info["fallback"]
         if node.get("type") == "n8n-nodes-base.set":
-            # Keep Set's original version so converters can distinguish legacy field selection.
+    # Сохраняем исходную версию Set, чтобы конвертер различал выбор полей в старом формате.
             compatible["_n8nOriginalTypeVersion"] = node.get("typeVersion")
     if node.get("type") == "n8n-nodes-base.splitInBatches":
         original_parameters = node.get("parameters")

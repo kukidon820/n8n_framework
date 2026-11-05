@@ -1,4 +1,4 @@
-"""Provider endpoints recognized by the optional LangGraph converter mode."""
+"""Адреса AI-провайдеров, распознаваемые в режиме LangGraph."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 @dataclass(frozen=True)
 class ProviderEndpoint:
-    """Describe one provider API shape that can be adapted to a chat model."""
+    """Описать API-адрес провайдера, для которого доступен адаптер chat-модели."""
 
     provider: str
     operation: str
@@ -17,8 +17,8 @@ class ProviderEndpoint:
     default_base_path: str = ""
 
 
-# Keep provider-specific URL knowledge in one place so adding a provider does
-# not spread hostname and endpoint checks through the workflow generator.
+# Храним адреса провайдеров в одном месте, чтобы добавление нового провайдера
+# не размножало проверки host и endpoint по генератору workflow.
 PROVIDER_ENDPOINTS: tuple[ProviderEndpoint, ...] = (
     ProviderEndpoint(
         provider="openai",
@@ -80,11 +80,10 @@ PROVIDER_ENDPOINTS: tuple[ProviderEndpoint, ...] = (
 
 
 def match_provider_endpoint(url: str) -> ProviderEndpoint | None:
-    """Return a provider endpoint only for a matching host and route pair.
+    """Найти endpoint только при совпадении host и пути запроса.
 
-    Route-only matches are intentionally insufficient here. A Telegram bot
-    method or internal API can use a similarly named path without calling an
-    LLM provider.
+    Совпадения одного пути недостаточно: метод Telegram Bot API или внутренний
+    API может иметь похожее имя пути, не обращаясь к провайдеру языковой модели.
     """
     try:
         parsed = urlsplit(url)
@@ -96,8 +95,8 @@ def match_provider_endpoint(url: str) -> ProviderEndpoint | None:
 
     for endpoint in PROVIDER_ENDPOINTS:
         host_matches = host in endpoint.hosts
-        # Ollama is often exposed through a nonstandard local hostname while
-        # retaining its documented default port.
+        # Ollama часто доступен по локальному имени узла, но сохраняет
+        # стандартный порт 11434.
         if endpoint.provider == "ollama" and port == 11434:
             host_matches = True
         if not host_matches:
@@ -108,7 +107,7 @@ def match_provider_endpoint(url: str) -> ProviderEndpoint | None:
 
 
 def endpoint_base_url(url: str, endpoint: ProviderEndpoint) -> str:
-    """Strip a recognized operation path while preserving a reverse proxy prefix."""
+    """Убрать путь операции, сохранив префикс обратного прокси."""
     parsed = urlsplit(url)
     path = parsed.path.rstrip("/")
     lower_path = path.casefold()
@@ -119,8 +118,8 @@ def endpoint_base_url(url: str, endpoint: ProviderEndpoint) -> str:
     prefix = path[: len(path) - len(suffix)] if suffix else path
     base_path = endpoint.default_base_path
     if endpoint.provider in {"openai", "deepseek", "openrouter", "anthropic"}:
-        # Preserve the API version supplied in a custom URL, and preserve any
-        # prefix inserted by a gateway in front of the known route.
+        # Сохраняем версию API из исходного URL и префикс шлюза,
+        # который может стоять перед известным путём.
         if prefix.endswith(base_path):
             prefix = prefix[: -len(base_path)] if base_path else prefix
         elif endpoint.provider == "deepseek" and prefix.endswith("/v1"):
