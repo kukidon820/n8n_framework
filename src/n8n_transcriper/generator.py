@@ -232,7 +232,6 @@ def node_conversion_issues(
         if isinstance(node, dict) and isinstance(node.get("name"), str)
     }
 
-    email_smtp_credentials: dict[str, str] = {}
     # Обрабатываем узлы по одному, чтобы ошибка одного конвертера не скрывала остальные.
     for index, node in enumerate(nodes, start=1):
         if not isinstance(node, dict):
@@ -295,12 +294,6 @@ def node_conversion_issues(
                     http_secret_header_fields(node)
             elif kind == "n8n-nodes-base.emailSend":
                 generate_email_send_node(conversion_node, "run_node")
-                credentials = node.get("credentials", {})
-                credential = credentials.get("smtp", {}) if isinstance(credentials, dict) else {}
-                if isinstance(credential, dict):
-                    credential_reference = credential.get("id") or credential.get("name")
-                    if isinstance(credential_reference, str) and credential_reference:
-                        email_smtp_credentials[name or label] = credential_reference
             elif kind == "n8n-nodes-base.set":
                 generate_edit_fields(conversion_node, "run_node")
             elif kind == "n8n-nodes-base.noOp":
@@ -350,9 +343,6 @@ def node_conversion_issues(
                 f"{label}: не удалось проверить узел ({type(exc).__name__})."
             )
             issues.append((name, message))
-    if len(set(email_smtp_credentials.values())) > 1:
-        for name in email_smtp_credentials:
-            issues.append((name, f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются."))
     return issues
 
 
@@ -423,11 +413,6 @@ def _prepare_partial_workflow(
         channels = sorted(auxiliary_channels_by_agent.get(name, set()))
         if channels:
             skip(name, f"AI Agent содержит неподдерживаемые соединения: {', '.join(channels)}.")
-
-    for model_name, agent_names in model_agents_by_source.items():
-        if len(agent_names) > 1:
-            for agent_name in agent_names:
-                skip(agent_name, f"Chat Model {model_name} подключена к нескольким AI Agent и не может быть переведена.")
 
     original_main_edges = [edge for edge in edges if edge.channel == "main"]
     original_outgoing: dict[str, list[Connection]] = {}
@@ -696,131 +681,148 @@ def _loop_layout(
     base_order: list[str],
     feedback_edges: list[Any],
 ) -> dict[str, Any] | None:
-    """Проверить поддерживаемую схему Loop и разделить граф на три области.
-
-    Сейчас один workflow может содержать один Loop с одним начальным входом и
-    одной обратной связью. Возвращаемая структура хранит узлы до цикла, узлы
-    тела, done-ветвь и порядок, в котором их нужно сгенерировать.
-
-    Returns:
-        Сведения о цикле или ``None``, если в графе нет Loop Over Items.
-
-    Raises:
-        WorkflowError: если у цикла нет единственного входа/обратной связи,
-            ветви пересекаются или в workflow есть узлы вне этих областей.
-    """
-    # Ограничение на один цикл позволяет сгенерировать понятный вложенный блок
-    # в main.py без runtime-планировщика и универсального движка графов.
+    """Построить план расположения всех циклов в workflow."""
     loop_names = [
-        name for name in main_nodes
+        name for name in base_order
         if nodes[name]["type"] == "n8n-nodes-base.splitInBatches"
     ]
     if not loop_names:
         if feedback_edges:
             raise WorkflowError("Обнаружена обратная связь без узла Loop Over Items")
         return None
-    if len(loop_names) != 1:
-        raise WorkflowError("Пока поддерживается один узел Loop Over Items в workflow")
 
-    name = loop_names[0]
-    settings = generate_loop_node(compatible_node(nodes[name]))
-    feedback = [edge for edge in feedback_edges if edge.target == name]
-    if len(feedback) != 1 or feedback[0].input != 0 or feedback[0].output != 0:
-        raise WorkflowError(
-            f"Узел {name}: требуется ровно одна обратная связь с выхода 0 на вход 0"
-        )
-    feedback_edge = feedback[0]
     dag_edges = [edge for edge in main_edges if edge not in feedback_edges]
-    loop_inputs = [edge for edge in dag_edges if edge.target == name]
-    if len(loop_inputs) != 1 or loop_inputs[0].input != 0:
-        raise WorkflowError(f"Узел {name}: требуется ровно один начальный вход")
-
     outgoing: dict[str, list[Any]] = {}
-    incoming: dict[str, list[Any]] = {}
     for edge in dag_edges:
         outgoing.setdefault(edge.source, []).append(edge)
-        incoming.setdefault(edge.target, []).append(edge)
 
-    loop_edges = [edge for edge in dag_edges if edge.source == name and edge.output == settings.loop_output]
-    if not loop_edges:
-        raise WorkflowError(f"Узел {name}: выход loop не подключён")
-    done_edges = (
-        [edge for edge in dag_edges if edge.source == name and edge.output == settings.done_output]
-        if settings.done_output is not None
-        else []
-    )
-
-    def reachable(starts: list[Any]) -> set[str]:
-        """Найти все узлы, достижимые из выбранного выхода Loop."""
+    def reachable(starts: list[Any], loop_name: str) -> set[str]:
+        """Найти узлы, достижимые от выхода одного цикла."""
         visited: set[str] = set()
         pending = [edge.target for edge in starts]
         while pending:
             current = pending.pop()
-            if current == name or current in visited:
+            if current == loop_name or current in visited:
                 continue
             visited.add(current)
             pending.extend(edge.target for edge in outgoing.get(current, []))
         return visited
 
-    # Две ветви должны быть независимыми: тело запускается на каждой итерации,
-    # а done-ветвь — только после завершения цикла.
-    body_nodes = reachable(loop_edges)
-    done_nodes = reachable(done_edges)
-    overlap = body_nodes & done_nodes
-    if overlap:
-        raise WorkflowError(
-            f"Узел {name}: ветви loop и done пересекаются у узла {sorted(overlap)[0]}"
-        )
-
-    for edge in dag_edges:
-        if edge.target in body_nodes and edge.source not in body_nodes and not (
-            edge.source == name and edge.output == settings.loop_output
-        ):
+    loops: dict[str, dict[str, Any]] = {}
+    for name in loop_names:
+        settings = generate_loop_node(compatible_node(nodes[name]))
+        feedback = [edge for edge in feedback_edges if edge.target == name]
+        if len(feedback) != 1 or feedback[0].input != 0 or feedback[0].output != 0:
             raise WorkflowError(
-                f"Узел {edge.target}: вход в тело Loop должен идти из узла Loop или его тела"
+                f"Узел {name}: ожидается одна обратная связь на вход 0 из выхода 0"
             )
-        if edge.target in done_nodes and edge.source not in done_nodes and not (
-            edge.source == name and edge.output == settings.done_output
-        ):
-            raise WorkflowError(
-                f"Узел {edge.target}: done-ветвь должна начинаться с выхода done узла {name}"
-            )
-
-    if feedback_edge.source not in body_nodes:
-        raise WorkflowError(f"Узел {name}: обратная связь должна идти из тела цикла")
-
-    before_nodes: set[str] = set()
-    pending = [edge.source for edge in loop_inputs]
-    while pending:
-        current = pending.pop()
-        if current == name or current in before_nodes:
-            continue
-        before_nodes.add(current)
-        pending.extend(edge.source for edge in incoming.get(current, []))
-
-    categorized = before_nodes | body_nodes | done_nodes | {name}
-    unplaced = main_nodes - categorized
-    if unplaced:
-        raise WorkflowError(
-            f"Узел {sorted(unplaced)[0]} не входит во вход, тело или done-ветвь Loop {name}"
+        loop_inputs = [edge for edge in dag_edges if edge.target == name]
+        if len(loop_inputs) != 1 or loop_inputs[0].input != 0:
+            raise WorkflowError(f"Узел {name}: ожидается ровно один входной поток")
+        loop_edges = [
+            edge for edge in dag_edges
+            if edge.source == name and edge.output == settings.loop_output
+        ]
+        if not loop_edges:
+            raise WorkflowError(f"Узел {name}: выход loop не подключён")
+        done_edges = (
+            [edge for edge in dag_edges if edge.source == name and edge.output == settings.done_output]
+            if settings.done_output is not None else []
         )
-    if before_nodes & (body_nodes | done_nodes):
-        raise WorkflowError(f"Узел {name}: путь до цикла пересекается с его выходами")
+        body_nodes = reachable(loop_edges, name)
+        done_nodes = reachable(done_edges, name)
+        overlap = body_nodes & done_nodes
+        if overlap:
+            raise WorkflowError(
+                f"Узел {name}: ветви loop и done пересекаются в узле {sorted(overlap)[0]}"
+            )
+        for edge in dag_edges:
+            if edge.target in body_nodes and edge.source not in body_nodes and not (
+                edge.source == name and edge.output == settings.loop_output
+            ):
+                raise WorkflowError(
+                    f"Узел {edge.target}: вход в тело Loop должен идти из самого Loop или узла тела"
+                )
+            if edge.target in done_nodes and edge.source not in done_nodes and not (
+                edge.source == name and edge.output == settings.done_output
+            ):
+                raise WorkflowError(
+                    f"Узел {edge.target}: done-ветка должна начинаться с выхода done узла {name}"
+                )
+        if feedback[0].source not in body_nodes:
+            raise WorkflowError(f"Узел {name}: обратная связь должна идти из тела цикла")
+        if not body_nodes:
+            raise WorkflowError(f"Узел {name}: тело цикла пустое")
+        loops[name] = {
+            "name": name,
+            "settings": settings,
+            "feedback": feedback[0],
+            "body": body_nodes,
+            "done": done_nodes,
+        }
 
-    order = (
-        [node for node in base_order if node in before_nodes]
-        + [name]
-        + [node for node in base_order if node in body_nodes]
-        + [node for node in base_order if node in done_nodes]
+    # Области могут быть вложенными или независимыми; частичное пересечение
+    # означало бы, что один узел исполняется сразу в двух несогласованных циклах.
+    for index, first in enumerate(loop_names):
+        for second in loop_names[index + 1:]:
+            first_body = loops[first]["body"]
+            second_body = loops[second]["body"]
+            overlap = first_body & second_body
+            if overlap and not (first_body <= second_body or second_body <= first_body):
+                raise WorkflowError(
+                    f"Циклы {first} и {second} пересекаются, но не вложены друг в друга"
+                )
+            if overlap:
+                outer, inner = (
+                    (first, second) if first_body > second_body else (second, first)
+                )
+                if inner not in loops[outer]["body"]:
+                    raise WorkflowError(
+                        f"Цикл {inner} пересекается с телом {outer}, но не вложен в него"
+                    )
+
+    # Поставить все тело каждого цикла перед его done-веткой.
+    rank = {name: index for index, name in enumerate(base_order)}
+    ordering_edges = {(edge.source, edge.target) for edge in dag_edges}
+    for loop in loops.values():
+        ordering_edges.update(
+            (body_name, done_name)
+            for body_name in loop["body"]
+            for done_name in loop["done"]
+            if body_name != done_name
+        )
+    successors: dict[str, set[str]] = {name: set() for name in main_nodes}
+    indegree = {name: 0 for name in main_nodes}
+    for source, target in ordering_edges:
+        if target not in successors[source]:
+            successors[source].add(target)
+            indegree[target] += 1
+    ready = sorted(
+        (name for name, count in indegree.items() if count == 0), key=rank.get
     )
+    order: list[str] = []
+    while ready:
+        current = ready.pop(0)
+        order.append(current)
+        for target in sorted(successors[current], key=rank.get):
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+                ready.sort(key=rank.get)
+    if len(order) != len(main_nodes):
+        raise WorkflowError("Не удалось определить порядок узлов между несколькими циклами")
+
+    return {"loops": loops, "order": order, "dag_edges": dag_edges}
+
+
+def _connection_profiles(prefix: str, references: set[str]) -> dict[str, str]:
+    """Назначить каждой credential стабильный префикс переменных config.py."""
+    ordered = sorted(references)
+    if len(ordered) <= 1:
+        return {reference: prefix for reference in ordered}
     return {
-        "name": name,
-        "settings": settings,
-        "feedback": feedback_edge,
-        "body": body_nodes,
-        "done": done_nodes,
-        "order": order,
-        "dag_edges": dag_edges,
+        reference: f"{prefix}_{hashlib.sha256(reference.encode('utf-8')).hexdigest()[:8].upper()}"
+        for reference in ordered
     }
 
 
@@ -846,6 +848,38 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
     nodes = {node["name"]: node for node in workflow["nodes"]}
     if not nodes:
         raise WorkflowError("Workflow не содержит узлов")
+    smtp_reference_by_node: dict[str, str] = {}
+    postgres_reference_by_node: dict[str, str] = {}
+    for node_name, node in nodes.items():
+        kind = node.get("type")
+        credentials = node.get("credentials", {})
+        if kind == "n8n-nodes-base.emailSend" or (
+            kind == "n8n-nodes-base.httpRequest" and is_gmail_send_node(node)
+        ):
+            credential = credentials.get("smtp", {}) if isinstance(credentials, dict) else {}
+            reference = (
+                credential.get("id") or credential.get("name")
+                if isinstance(credential, dict) else None
+            )
+            smtp_reference_by_node[node_name] = str(reference or "__default__")
+        elif kind == "n8n-nodes-base.postgres":
+            credential = credentials.get("postgres", {}) if isinstance(credentials, dict) else {}
+            reference = credential.get("id") if isinstance(credential, dict) else None
+            postgres_reference_by_node[node_name] = str(reference or "__missing__")
+    smtp_profiles_by_reference = _connection_profiles(
+        "SMTP", set(smtp_reference_by_node.values())
+    )
+    postgres_profiles_by_reference = _connection_profiles(
+        "POSTGRES", set(postgres_reference_by_node.values())
+    )
+    smtp_profile_by_node = {
+        name: smtp_profiles_by_reference[reference]
+        for name, reference in smtp_reference_by_node.items()
+    }
+    postgres_profile_by_node = {
+        name: postgres_profiles_by_reference[reference]
+        for name, reference in postgres_reference_by_node.items()
+    }
     # AI-модель принадлежит агенту: запоминаем её имя, чтобы передать конфигурацию
     # прямо в модуль агента и исключить модель из последовательности узлов.
     models: dict[str, str] = {}
@@ -868,9 +902,6 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             )
         models[edge.target] = edge.source
     model_names = set(models.values())
-    if len(model_names) != len(models):
-        agents = ", ".join(sorted(models))
-        raise WorkflowError(f"Узлы {agents}: одна chat-модель не может быть подключена к нескольким AI Agent")
     all_main_edges = [edge for edge in edges if edge.channel == "main"]
     if any(edge.target_type != "main" or edge.source in model_names or edge.target in model_names or (edge.input != 0 and nodes[edge.target]["type"] != "n8n-nodes-base.merge") for edge in all_main_edges):
         raise WorkflowError("Неподдерживаемые основные соединения")
@@ -915,13 +946,25 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
         ancestors[name] = set().union(*({edge.source} | ancestors[edge.source] for edge in parents[name])) if parents[name] else set()
     aliases = {name: f"output_{index:03d}" for index, name in enumerate(order)}
     module_names = _module_names(nodes)
+    loop_infos = loop_info["loops"] if loop_info else {}
+    loop_state_names = {
+        name: f"loop_{module_names[name]}" for name in loop_infos
+    }
+    node_loop_chains = {
+        name: sorted(
+            (loop_name for loop_name, info in loop_infos.items() if name in info["body"]),
+            key=lambda loop_name: (-len(loop_infos[loop_name]["body"]), loop_name),
+        )
+        for name in order
+    }
+    node_loop_owners = {
+        name: (chain[-1] if chain else None)
+        for name, chain in node_loop_chains.items()
+    }
     files: dict[str, str] = {}
     imports = []
     calls = []
-    loop_state_name = None
-    loop_body_call_start = None
-    loop_body_order = [name for name in order if loop_info and name in loop_info["body"]]
-    loop_body_nodes = loop_info["body"] if loop_info else set()
+    call_ranges: dict[str, tuple[int, int]] = {}
     converted = 0
     skipped = 0
     skipped_triggers: list[dict[str, Any]] = []
@@ -932,18 +975,24 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
     uses_smtp = False
     uses_email_send = False
     uses_wait = False
-    email_smtp_credential = None
+    smtp_profiles: dict[str, dict[str, str | bool]] = {}
     http_credentials: set[str] = set()
     http_credential_descriptions: dict[str, set[str]] = {}
-    postgres_credential = None
+    postgres_profiles: dict[str, str] = {}
     uses_data_tables = False
     data_table_mappings: dict[str, str] = {}
     version_notes: list[tuple[str, str]] = []
     manual_fallback_notes: list[str] = []
     # Для каждого узла создаём отдельный модуль; ниже формируется его вызов в main.py.
     for name in order:
+        call_start = len(calls)
         node = nodes[name]
         kind = node["type"]
+        active_loop_state = loop_state_names.get(node_loop_owners.get(name))
+        result_offset = (
+            f"len({active_loop_state}.results.get({name!r}, []))"
+            if active_loop_state else "0"
+        )
         conversion_node = compatible_node(node)
         version_warning = node_version_warning(node)
         manual_parameters = manual_parameter_payload(node) or None
@@ -967,6 +1016,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             })
             if branching:
                 calls.append(f"    {aliases[name]} = [items]")
+            call_ranges[name] = (call_start, len(calls))
             continue
         for setting in ("disabled", "continueOnFail"):
             if node.get(setting, False) is not False:
@@ -1001,7 +1051,15 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 smtp_gmail = is_gmail_send_node(node)
                 if smtp_gmail:
                     folder = "email_senders"
-                    source, references = generate_smtp_node(conversion_node, function)
+                    smtp_prefix = smtp_profile_by_node[name]
+                    source, references = generate_smtp_node(
+                        conversion_node, function, smtp_prefix
+                    )
+                    profile = smtp_profiles.setdefault(
+                        smtp_prefix,
+                        {"reference": smtp_reference_by_node[name], "gmail": False, "email_send": False},
+                    )
+                    profile["gmail"] = True
                     uses_smtp = True
                     dependencies.add("aiosmtplib>=3.0")
                 else:
@@ -1043,17 +1101,22 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 arguments = "items, results, execution"
             elif kind == "n8n-nodes-base.emailSend":
                 folder = "email_senders"
-                source, references = generate_email_send_node(conversion_node, function)
+                smtp_prefix = smtp_profile_by_node[name]
+                source, references = generate_email_send_node(
+                    conversion_node, function, smtp_prefix
+                )
                 credentials = node.get("credentials", {})
                 credential = credentials.get("smtp", {}) if isinstance(credentials, dict) else {}
-                credential_reference = (
-                    credential.get("id") or credential.get("name")
-                    if isinstance(credential, dict)
-                    else None
+                profile = smtp_profiles.setdefault(
+                    smtp_prefix,
+                    {
+                        "reference": smtp_reference_by_node[name],
+                        "name": credential.get("name", "") if isinstance(credential, dict) else "",
+                        "gmail": False,
+                        "email_send": False,
+                    },
                 )
-                if email_smtp_credential is not None and credential_reference != email_smtp_credential:
-                    raise WorkflowError(f"Узел {name}: несколько SMTP credentials в одном проекте не поддерживаются")
-                email_smtp_credential = credential_reference
+                profile["email_send"] = True
                 uses_email_send = True
                 dependencies.add("aiosmtplib>=3.0")
                 missing = references - (completed & ancestors[name] if branching else completed)
@@ -1075,12 +1138,13 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 credential = node.get("credentials", {}).get("postgres", {})
                 credential_id = credential.get("id") if isinstance(credential, dict) else None
                 if not isinstance(credential_id, str) or not credential_id:
-                    raise WorkflowError(f"Узел {name}: требуется PostgreSQL credential")
-                if postgres_credential is not None and postgres_credential != credential_id:
-                    raise WorkflowError(f"Узел {name}: несколько PostgreSQL credentials пока не поддерживаются")
-                postgres_credential = credential_id
+                    raise WorkflowError(f"Узел {name}: отсутствует credential PostgreSQL")
                 folder = "database"
-                source, references = generate_postgres_node(conversion_node, function)
+                postgres_prefix = postgres_profile_by_node[name]
+                postgres_profiles[postgres_prefix] = credential_id
+                source, references = generate_postgres_node(
+                    conversion_node, function, postgres_prefix
+                )
                 missing = references - (completed & ancestors[name] if branching else completed)
                 if missing:
                     raise WorkflowError(f"Узел {name}: результаты узлов ещё недоступны: {', '.join(sorted(missing))}")
@@ -1197,8 +1261,8 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             files["operations/loop.py"] = LOOP_MODULE
             if "from operations.loop import Loop" not in imports:
                 imports.append("from operations.loop import Loop")
-            loop_state_name = f"loop_{stem}"
-            loop_settings = loop_info["settings"]
+            loop_state_name = loop_state_names[name]
+            loop_settings = loop_infos[name]["settings"]
             calls.append("    items = []")
             for edge in parents[name]:
                 value = f"{aliases[edge.source]}[{edge.output}]"
@@ -1229,9 +1293,9 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                 f"            {aliases[name]}[{loop_settings.loop_output}] = loop_batch",
                 f"            results[{name!r}] = loop_batch",
             ])
-            loop_body_call_start = len(calls)
             converted += 1
             completed.add(name)
+            call_ranges[name] = (call_start, len(calls))
             continue
         else:
             imports.append(f"from {folder}.{stem} import {function} as {stem}")
@@ -1269,7 +1333,7 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     calls.extend([
                         f"        branch_outputs = {invocation}",
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r}, "
-                        f"len({loop_state_name}.results.get({name!r}, [])))" if name in loop_body_nodes else
+                        f"{result_offset}))" if active_loop_state else
                         f"        {aliases[name]} = _link_outputs(items, branch_outputs, {name!r})",
                     ])
                 else:
@@ -1284,22 +1348,22 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
                     if kind == "n8n-nodes-base.merge":
                         calls.append(
                             f"        items = _link_merge(merge_inputs, items, {name!r}, "
-                            f"len({loop_state_name}.results.get({name!r}, [])))"
-                            if name in loop_body_nodes else
+                            f"{result_offset}))"
+                            if active_loop_state else
                             f"        items = _link_merge(merge_inputs, items, {name!r})"
                         )
                     else:
                         calls.append(
                             f"        items = _link_lineage(source_items, items, {name!r}, "
-                            f"len({loop_state_name}.results.get({name!r}, [])))"
-                            if name in loop_body_nodes else
+                            f"{result_offset}))"
+                            if active_loop_state else
                             f"        items = _link_lineage(source_items, items, {name!r})"
                         )
                 if kind == "n8n-nodes-base.dataTable":
                     calls.append("        for output_item in items: output_item.pop('pairedItem', None)")
                 stored_items = (
-                    f"{loop_state_name}.record_result({name!r}, items)"
-                    if name in loop_body_nodes else "items"
+                    f"{active_loop_state}.record_result({name!r}, items)"
+                    if active_loop_state else "items"
                 )
                 calls.extend([f"        {aliases[name]}[0] = items", f"        results[{name!r}] = {stored_items}"])
             calls.extend([
@@ -1309,8 +1373,8 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             if is_condition:
                 flattened = f"[item for output in {aliases[name]} for item in output]"
                 stored_outputs = (
-                    f"{loop_state_name}.record_result({name!r}, {flattened})"
-                    if name in loop_body_nodes else flattened
+                    f"{active_loop_state}.record_result({name!r}, {flattened})"
+                    if active_loop_state else flattened
                 )
                 calls.append(f"    results[{name!r}] = {stored_outputs}")
         else:
@@ -1329,53 +1393,76 @@ def _generate_supported_project(workflow: dict[str, Any]) -> dict[str, str]:
             if linked_items:
                 calls.append(
                     f"    items = _link_lineage(source_items, items, {name!r}, "
-                    f"len({loop_state_name}.results.get({name!r}, [])))"
-                    if name in loop_body_nodes else
+                    f"{result_offset}))"
+                    if active_loop_state else
                     f"    items = _link_lineage(source_items, items, {name!r})"
                 )
             if kind == "n8n-nodes-base.dataTable":
                 calls.append("    for output_item in items: output_item.pop('pairedItem', None)")
             stored_items = (
-                f"{loop_state_name}.record_result({name!r}, items)"
-                if name in loop_body_nodes else "items"
+                f"{active_loop_state}.record_result({name!r}, items)"
+                if active_loop_state else "items"
             )
             calls.append(f"    results[{name!r}] = {stored_items}")
         converted += 1
         completed.add(name)
-        if loop_info and name in loop_info["body"] and name == loop_body_order[-1]:
-            for call_index in range(loop_body_call_start, len(calls)):
-                calls[call_index] = "        " + calls[call_index]
-            feedback = loop_info["feedback"]
-            calls.append(
-                f"            await {loop_state_name}.collect({aliases[feedback.source]}[{feedback.output}])"
+        call_ranges[name] = (call_start, len(calls))
+    loop_endings: dict[str, list[str]] = {}
+    order_index = {name: index for index, name in enumerate(order)}
+    for loop_name, info in loop_infos.items():
+        last_body_node = max(info["body"], key=order_index.__getitem__)
+        loop_endings.setdefault(last_body_node, []).append(loop_name)
+    ordered_calls: list[str] = []
+    for name in order:
+        start, end = call_ranges[name]
+        node_indent = "        " * len(node_loop_chains[name])
+        ordered_calls.extend(node_indent + line for line in calls[start:end])
+        ending_loops = sorted(
+            loop_endings.get(name, []),
+            key=lambda loop_name: len(loop_infos[loop_name]["body"]),
+        )
+        for loop_name in ending_loops:
+            info = loop_infos[loop_name]
+            state_name = loop_state_names[loop_name]
+            feedback = info["feedback"]
+            parent_loop_state = loop_state_names.get(
+                node_loop_owners.get(loop_name)
             )
-            calls.extend([
+            close_lines = [
+                f"            await {state_name}.collect({aliases[feedback.source]}[{feedback.output}])",
                 "    except Exception as exc:",
-                f"        logging.error({('Узел «' + loop_info['name'] + '»: цикл прерван: %s')!r}, exc)",
+                f"        logging.error({('Узел «' + loop_name + '»: цикл прерван: %s')!r}, exc)",
                 "        raise",
-            ])
-            loop_settings = loop_info["settings"]
-            if loop_settings.done_output is not None:
-                calls.append(
-                    f"    {aliases[loop_info['name']]}[{loop_settings.done_output}] = "
-                    f"deepcopy({loop_state_name}.done_items)"
+            ]
+            settings = info["settings"]
+            if settings.done_output is not None:
+                close_lines.append(
+                    f"    {aliases[loop_name]}[{settings.done_output}] = "
+                    f"deepcopy({state_name}.done_items)"
                 )
-            calls.append(
-                f"    results[{loop_info['name']!r}] = {loop_state_name}.done_items"
+            stored_results = (
+                f"{parent_loop_state}.record_result({loop_name!r}, {state_name}.done_items)"
+                if parent_loop_state else f"{state_name}.done_items"
             )
-            calls.append(
-                f"    logging.info({('Узел «' + loop_info['name'] + '»: завершён; выходных элементов: %d')!r}, len({loop_state_name}.done_items))"
-            )
+            close_lines.extend([
+                f"    results[{loop_name!r}] = {stored_results}",
+                f"    logging.info({('Узел «' + loop_name + '»: завершён; выходных элементов: %d')!r}, len({state_name}.done_items))",
+            ])
+            parent_indent = "        " * len(node_loop_chains[loop_name])
+            ordered_calls.extend(parent_indent + line for line in close_lines)
+    calls = ordered_calls
     if not converted:
         raise WorkflowError("Workflow не содержит исполняемых поддерживаемых узлов")
     terminal = [name for name in order if outgoing[name] == 0 and nodes[name]["type"] not in {"n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.manualTrigger"}]
-    if loop_info:
+    if loop_infos:
         terminal_values = [
-            f"{loop_state_name}.results.get({name!r}, [])" if name in loop_body_nodes
+            f"{loop_state_names[node_loop_owners[name]]}.results.get({name!r}, [])"
+            if node_loop_owners[name] is not None
             else f"{aliases[name]}[0]"
             for name in terminal
         ]
-        return_code = " + ".join(terminal_values) or f"{loop_state_name}.done_items"
+        last_loop = max(loop_infos, key=lambda loop_name: order_index[loop_name])
+        return_code = " + ".join(terminal_values) or f"{loop_state_names[last_loop]}.done_items"
     else:
         return_code = ' + '.join(f'{aliases[name]}[0]' for name in terminal) or '[]' if branching else 'items'
     lineage_helpers = ('LINKED_ITEM_NODES = ' + repr(tuple(sorted(linked_names))) + '\n\n\n' + '''def _link_lineage(source_items, output_items, node_name, index_offset=0):
@@ -1597,36 +1684,37 @@ async def _run_logged_node(node_name, operation):
                    'GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID", "")\n'
                    'GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET", "")\n'
                    'GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN", "")\n')
-    if uses_smtp or uses_email_send:
-        smtp_comment = (
-            "SMTP Gmail: используйте полный адрес и пароль приложения, не пароль аккаунта."
-            if uses_smtp
-            else "SMTP credentials из n8n не экспортируются; заполните параметры подключения здесь."
-        )
-        smtp_host = "smtp.gmail.com" if uses_smtp else ""
+    for prefix, profile in sorted(smtp_profiles.items()):
+        credential_label = str(profile.get("name") or profile.get("reference") or "default")
+        smtp_host = "smtp.gmail.com" if profile.get("gmail") else ""
         config += (
-            f"\n# {smtp_comment}\n"
-            f'SMTP_HOST = os.getenv("SMTP_HOST", {json.dumps(smtp_host)})\n'
-            'SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))\n'
-            'SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")\n'
-            'SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD", "")\n'
-            'SMTP_FROM = os.getenv("SMTP_FROM", "")\n'
-            'SMTP_HOSTNAME = os.getenv("SMTP_HOSTNAME", "")\n'
-            'SMTP_USE_SSL = os.getenv("SMTP_USE_SSL", "false").lower() in {"1", "true", "yes"}\n'
-            'SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "true").lower() in {"1", "true", "yes"}\n'
+            f"\n# SMTP-??????????? ??? credentials {credential_label!r}.\n"
+            f'{prefix}_HOST = os.getenv("{prefix}_HOST", {json.dumps(smtp_host)})\n'
+            f'{prefix}_PORT = int(os.getenv("{prefix}_PORT", "587"))\n'
+            f'{prefix}_USERNAME = os.getenv("{prefix}_USERNAME", "")\n'
+            f'{prefix}_APP_PASSWORD = os.getenv("{prefix}_APP_PASSWORD", "")\n'
+            f'{prefix}_FROM = os.getenv("{prefix}_FROM", "")\n'
+            f'{prefix}_HOSTNAME = os.getenv("{prefix}_HOSTNAME", "")\n'
+            f'{prefix}_USE_SSL = os.getenv("{prefix}_USE_SSL", "false").lower() in {{"1", "true", "yes"}}\n'
+            f'{prefix}_STARTTLS = os.getenv("{prefix}_STARTTLS", "true").lower() in {{"1", "true", "yes"}}\n'
         )
     for key in sorted(http_credentials):
         for description in sorted(http_credential_descriptions.get(key, set())):
             config += f'\n# {description}.\n'
         config += f'{key} = os.getenv({key!r}, "")\n'
-    if postgres_credential is not None or uses_data_tables:
-        config += ('\n# Подключение к PostgreSQL; пароль не хранится в исходном workflow.\n'
-                   'POSTGRES_HOST = os.getenv("POSTGRES_HOST", "")\n'
-                   'POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))\n'
-                   'POSTGRES_DATABASE = os.getenv("POSTGRES_DATABASE", "")\n'
-                   'POSTGRES_USER = os.getenv("POSTGRES_USER", "")\n'
-                   'POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")\n'
-                   'POSTGRES_CONNECT_TIMEOUT = float(os.getenv("POSTGRES_CONNECT_TIMEOUT", "30"))\n')
+    postgres_config_profiles = dict(postgres_profiles)
+    if uses_data_tables:
+        postgres_config_profiles.setdefault("POSTGRES", "Data Table")
+    for prefix, credential_id in sorted(postgres_config_profiles.items()):
+        config += (
+            f"\n# ??????????? PostgreSQL ??? credentials {credential_id!r}.\n"
+            f'{prefix}_HOST = os.getenv("{prefix}_HOST", "")\n'
+            f'{prefix}_PORT = int(os.getenv("{prefix}_PORT", "5432"))\n'
+            f'{prefix}_DATABASE = os.getenv("{prefix}_DATABASE", "")\n'
+            f'{prefix}_USER = os.getenv("{prefix}_USER", "")\n'
+            f'{prefix}_PASSWORD = os.getenv("{prefix}_PASSWORD", "")\n'
+            f'{prefix}_CONNECT_TIMEOUT = float(os.getenv("{prefix}_CONNECT_TIMEOUT", "30"))\n'
+        )
     if uses_data_tables:
         config += (
             '\n# Сопоставление ссылок n8n Data Table с именами таблиц PostgreSQL.\n'
@@ -1643,13 +1731,19 @@ async def _run_logged_node(node_name, operation):
             required.append(f"{prefix}_API_URL")
     if uses_gmail:
         required.extend(["GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"])
-    if uses_smtp or uses_email_send:
-        required.extend(["SMTP_USERNAME", "SMTP_APP_PASSWORD"])
-    if uses_email_send and not uses_smtp:
-        required.append("SMTP_HOST")
+    for prefix, profile in sorted(smtp_profiles.items()):
+        required.extend([f"{prefix}_USERNAME", f"{prefix}_APP_PASSWORD"])
+        if profile.get("email_send") and not profile.get("gmail"):
+            required.append(f"{prefix}_HOST")
     required.extend(sorted(http_credentials))
-    if postgres_credential is not None or uses_data_tables:
-        required.extend(["POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DATABASE", "POSTGRES_USER", "POSTGRES_PASSWORD"])
+    postgres_required = set(postgres_profiles)
+    if uses_data_tables:
+        postgres_required.add("POSTGRES")
+    for prefix in sorted(postgres_required):
+        required.extend([
+            f"{prefix}_HOST", f"{prefix}_PORT", f"{prefix}_DATABASE",
+            f"{prefix}_USER", f"{prefix}_PASSWORD",
+        ])
     credentials = ', '.join(f'`{key}`' for key in required) if required else 'не требуются'
     data_table_documentation = ""
     if uses_data_tables:
