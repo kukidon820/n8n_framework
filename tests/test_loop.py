@@ -70,6 +70,73 @@ def standard_loop_workflow(loop_version=3):
     }
 
 
+def sequential_loop_workflow():
+    """Создать workflow с двумя циклами, идущими один после другого."""
+    return {
+        "nodes": [
+            node("Start", "n8n-nodes-base.manualTrigger"),
+            node("Build", "n8n-nodes-base.code", {
+                "language": "pythonNative",
+                "pythonCode": 'return [{"json": {"value": value}} for value in range(5)]',
+            }),
+            node("First Loop", "n8n-nodes-base.splitInBatches", {"batchSize": 2}, 3),
+            node("Increment", "n8n-nodes-base.code", {
+                "language": "pythonNative",
+                "pythonCode": 'return [{"json": {"value": item["json"]["value"] + 1}} for item in _items]',
+            }),
+            node("Second Loop", "n8n-nodes-base.splitInBatches", {"batchSize": 2}, 3),
+            node("Add Ten", "n8n-nodes-base.code", {
+                "language": "pythonNative",
+                "pythonCode": 'return [{"json": {"value": item["json"]["value"] + 10}} for item in _items]',
+            }),
+            node("Finish", "n8n-nodes-base.code", {
+                "language": "pythonNative", "pythonCode": "return _items",
+            }),
+        ],
+        "connections": {
+            "Start": {"main": [[link("Build")]]},
+            "Build": {"main": [[link("First Loop")]]},
+            "First Loop": {"main": [[link("Second Loop")], [link("Increment")]]},
+            "Increment": {"main": [[link("First Loop")]]},
+            "Second Loop": {"main": [[link("Finish")], [link("Add Ten")]]},
+            "Add Ten": {"main": [[link("Second Loop")]]},
+        },
+    }
+
+
+def nested_loop_workflow():
+    """Создать workflow, в котором внутренний цикл выполняется для каждого пакета внешнего."""
+    return {
+        "nodes": [
+            node("Start", "n8n-nodes-base.manualTrigger"),
+            node("Build", "n8n-nodes-base.code", {
+                "language": "pythonNative",
+                "pythonCode": 'return [{"json": {"value": value}} for value in (1, 2)]',
+            }),
+            node("Outer Loop", "n8n-nodes-base.splitInBatches", {"batchSize": 1}, 3),
+            node("Inner Loop", "n8n-nodes-base.splitInBatches", {"batchSize": 1}, 3),
+            node("Multiply", "n8n-nodes-base.code", {
+                "language": "pythonNative",
+                "pythonCode": 'return [{"json": {"value": item["json"]["value"] * 10}} for item in _items]',
+            }),
+            node("Outer Feedback", "n8n-nodes-base.code", {
+                "language": "pythonNative", "pythonCode": "return _items",
+            }),
+            node("Finish", "n8n-nodes-base.code", {
+                "language": "pythonNative", "pythonCode": "return _items",
+            }),
+        ],
+        "connections": {
+            "Start": {"main": [[link("Build")]]},
+            "Build": {"main": [[link("Outer Loop")]]},
+            "Outer Loop": {"main": [[link("Finish")], [link("Inner Loop")]]},
+            "Inner Loop": {"main": [[link("Outer Feedback")], [link("Multiply")]]},
+            "Multiply": {"main": [[link("Inner Loop")]]},
+            "Outer Feedback": {"main": [[link("Outer Loop")]]},
+        },
+    }
+
+
 @pytest.mark.parametrize("version", [1, 2, 3, 3.2])
 def test_loop_version_outputs_and_default_batch_sizes(version):
     settings = generate_loop_node(node("Loop", "n8n-nodes-base.splitInBatches", {}, version))
@@ -173,3 +240,33 @@ def test_generated_loop_reset_stops_when_body_returns_no_items(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "[]"
+
+
+@pytest.mark.parametrize(
+    ("workflow_factory", "expected"),
+    [
+        (sequential_loop_workflow, [11, 12, 13, 14, 15]),
+        (nested_loop_workflow, [10, 20]),
+    ],
+)
+def test_generated_project_supports_multiple_and_nested_loops(
+    tmp_path, workflow_factory, expected
+):
+    output = tmp_path / workflow_factory.__name__
+    generate_project(workflow_factory(), output)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-X",
+            "utf8",
+            "-c",
+            "import main; print([item['json']['value'] for item in main.run()])",
+        ],
+        cwd=output,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == repr(expected)

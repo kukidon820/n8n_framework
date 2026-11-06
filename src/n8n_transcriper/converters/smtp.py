@@ -21,7 +21,9 @@ def is_gmail_send_node(node: dict[str, Any]) -> bool:
     return isinstance(url, str) and url.rstrip("/") == GMAIL_SEND_URL
 
 
-def generate_smtp_node(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
+def generate_smtp_node(
+    node: dict[str, Any], function_name: str, config_prefix: str = "SMTP"
+) -> tuple[str, set[str]]:
     """Сгенерировать SMTP-функцию для Gmail API запроса с MIME raw.
 
     Выражение jsonBody продолжает вычисляться из workflow, но отправка Gmail API
@@ -67,11 +69,11 @@ async def {function_name}(items, results, execution):
     получателей, а транспорт шифруется SSL либо STARTTLS по config.py.
     """
     # Секреты не встраиваются в модуль; SMTP требует включённого TLS-режима.
-    if not config.SMTP_HOST or not config.SMTP_USERNAME or not config.SMTP_APP_PASSWORD:
-        raise ValueError("Задайте SMTP_HOST, SMTP_USERNAME и SMTP_APP_PASSWORD в config.py или окружении")
-    if config.SMTP_USE_SSL and config.SMTP_STARTTLS:
-        raise ValueError("Выберите SMTP_USE_SSL или SMTP_STARTTLS, но не оба режима")
-    if not config.SMTP_USE_SSL and not config.SMTP_STARTTLS:
+    if not config.{config_prefix}_HOST or not config.{config_prefix}_USERNAME or not config.{config_prefix}_APP_PASSWORD:
+        raise ValueError("Задайте {config_prefix}_HOST, {config_prefix}_USERNAME и {config_prefix}_APP_PASSWORD в config.py или окружении")
+    if config.{config_prefix}_USE_SSL and config.{config_prefix}_STARTTLS:
+        raise ValueError("Выберите {config_prefix}_USE_SSL или {config_prefix}_STARTTLS, но не оба режима")
+    if not config.{config_prefix}_USE_SSL and not config.{config_prefix}_STARTTLS:
         raise ValueError("SMTP требует шифрование: включите SMTP_STARTTLS или SMTP_USE_SSL")
 
     sent = []
@@ -92,22 +94,22 @@ async def {function_name}(items, results, execution):
             raise ValueError("В MIME-письме отсутствуют получатели в заголовке To")
 
         # Если MIME не содержит From, используем настроенный адрес SMTP-аккаунта.
-        sender = config.SMTP_FROM or config.SMTP_USERNAME
+        sender = config.{config_prefix}_FROM or config.{config_prefix}_USERNAME
         if "From" not in message:
             message["From"] = sender
-        password = config.SMTP_APP_PASSWORD.replace(" ", "")
+        password = config.{config_prefix}_APP_PASSWORD.replace(" ", "")
         refused, _ = await aiosmtplib.send(
             message,
             sender=sender,
             recipients=recipients,
-            hostname=config.SMTP_HOST,
-            port=config.SMTP_PORT,
+            hostname=config.{config_prefix}_HOST,
+            port=config.{config_prefix}_PORT,
             timeout={timeout!r},
-            username=config.SMTP_USERNAME,
+            username=config.{config_prefix}_USERNAME,
             password=password,
-            use_tls=config.SMTP_USE_SSL,
-            start_tls=config.SMTP_STARTTLS and not config.SMTP_USE_SSL,
-            local_hostname=config.SMTP_HOSTNAME or None,
+            use_tls=config.{config_prefix}_USE_SSL,
+            start_tls=config.{config_prefix}_STARTTLS and not config.{config_prefix}_USE_SSL,
+            local_hostname=config.{config_prefix}_HOSTNAME or None,
             tls_context=ssl.create_default_context(),
         )
         if refused:
@@ -118,7 +120,9 @@ async def {function_name}(items, results, execution):
     return source, set(body.dependencies)
 
 
-def generate_email_send_node(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
+def generate_email_send_node(
+    node: dict[str, Any], function_name: str, config_prefix: str = "SMTP"
+) -> tuple[str, set[str]]:
     """Сгенерировать письмо из полей стандартного узла n8n Send Email.
 
     Конвертер проверяет формат содержимого, expressions, credentials, адресатов,
@@ -258,12 +262,12 @@ async def {function_name}(items, results, execution):
     в MIME по параметрам узла. В ответ возвращаются подтверждённые адресаты.
     """
     # Проверяем параметры транспортного уровня до сборки MIME-сообщения.
-    if not config.SMTP_HOST:
-        raise ValueError("Задайте SMTP_HOST в config.py или переменных окружения")
-    if not config.SMTP_USERNAME or not config.SMTP_APP_PASSWORD:
-        raise ValueError("Задайте SMTP_USERNAME и SMTP_APP_PASSWORD в config.py или окружении")
-    if config.SMTP_USE_SSL and config.SMTP_STARTTLS:
-        raise ValueError("Выберите SMTP_USE_SSL или SMTP_STARTTLS, но не оба режима")
+    if not config.{config_prefix}_HOST:
+        raise ValueError("Задайте {config_prefix}_HOST в config.py или переменных окружения")
+    if not config.{config_prefix}_USERNAME or not config.{config_prefix}_APP_PASSWORD:
+        raise ValueError("Задайте {config_prefix}_USERNAME и {config_prefix}_APP_PASSWORD в config.py или окружении")
+    if config.{config_prefix}_USE_SSL and config.{config_prefix}_STARTTLS:
+        raise ValueError("Выберите {config_prefix}_USE_SSL или {config_prefix}_STARTTLS, но не оба режима")
 
     tls_context = (
         ssl._create_unverified_context()
@@ -348,19 +352,19 @@ async def {function_name}(items, results, execution):
         if not sender_addresses:
             raise ValueError("В Email Send не указан корректный адрес отправителя")
 
-        password = config.SMTP_APP_PASSWORD.replace(" ", "")
+        password = config.{config_prefix}_APP_PASSWORD.replace(" ", "")
         refused, _ = await aiosmtplib.send(
             message,
             sender=sender_addresses[0],
             recipients=recipients,
-            hostname=config.SMTP_HOST,
-            port=config.SMTP_PORT,
+            hostname=config.{config_prefix}_HOST,
+            port=config.{config_prefix}_PORT,
             timeout=60,
-            username=config.SMTP_USERNAME,
+            username=config.{config_prefix}_USERNAME,
             password=password,
-            use_tls=config.SMTP_USE_SSL,
-            start_tls=config.SMTP_STARTTLS and not config.SMTP_USE_SSL,
-            local_hostname=config.SMTP_HOSTNAME or None,
+            use_tls=config.{config_prefix}_USE_SSL,
+            start_tls=config.{config_prefix}_STARTTLS and not config.{config_prefix}_USE_SSL,
+            local_hostname=config.{config_prefix}_HOSTNAME or None,
             validate_certs=not {allow_unauthorized_certs!r},
             tls_context=tls_context,
         )

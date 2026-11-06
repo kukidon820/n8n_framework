@@ -216,7 +216,8 @@ def _logged_step(name, action):
 def _make_loop_node(name, loop_class, parents, loop_output, done_output,
                     output_count, body_graph, feedback_source, feedback_output,
                     batch_size, reset, execute_once, retry_on_fail, max_tries,
-                    wait_between_tries, linked_items=False, manual_parameters=None):
+                    wait_between_tries, linked_items=False, manual_parameters=None,
+                    inside_loop=False):
     async def invoke(state):
         outputs = dict(state.get("outputs", {}))
         results = dict(state.get("results", {}))
@@ -266,7 +267,11 @@ def _make_loop_node(name, loop_class, parents, loop_output, done_output,
             loop_ports[done_output] = deepcopy(loop_runtime.done_items)
         outputs[name] = loop_ports
         results.update(loop_runtime.results)
-        results[name] = loop_runtime.done_items
+        parent_runtime = state.get("loop_runtime")
+        if inside_loop and parent_runtime is not None:
+            results[name] = parent_runtime.record_result(name, loop_runtime.done_items)
+        else:
+            results[name] = loop_runtime.done_items
         return {"outputs": outputs, "results": results}
 
     return invoke
@@ -344,7 +349,7 @@ def render_langgraph_main(
         if nodes[name].get("type") == "n8n-nodes-base.splitInBatches":
             alias = f"_LoopClass_{index}"
             loop_aliases[name] = alias
-            imports.append(f"from operations.{module_names[name]} import Loop as {alias}")
+            imports.append(f"from operations.loop import Loop as {alias}")
             continue
         folder = folders.get(name)
         if folder is None:
@@ -466,18 +471,14 @@ def _render_loop_graph(
     workflow: dict[str, Any],
     nodes: dict[str, dict[str, Any]],
     module_names: dict[str, str],
-    loop_info: dict[str, Any],
+    loop_plan: dict[str, Any],
     agent_nodes: set[str],
 ) -> str:
-    """Собрать внешнюю последовательность и вложенный граф тела Loop."""
-    full_order = loop_info["order"]
-    body_names = loop_info["body"]
-    body_order = [name for name in full_order if name in body_names]
-    outer_order = [name for name in full_order if name not in body_names]
-    if not body_order:
-        raise WorkflowError(f"Узел {loop_info['name']}: тело цикла пустое.")
-
-    main_edges = loop_info["dag_edges"]
+    """Собрать отдельный вложенный граф для тела каждого Loop Over Items."""
+    loops = loop_plan["loops"]
+    full_order = loop_plan["order"]
+    main_edges = loop_plan["dag_edges"]
+    order_index = {name: index for index, name in enumerate(full_order)}
     parents = {
         name: sorted(
             (edge for edge in main_edges if edge.target == name),
@@ -485,6 +486,35 @@ def _render_loop_graph(
         )
         for name in full_order
     }
+
+    parent_loop: dict[str, str] = {}
+    for loop_name in loops:
+        candidates = [
+            candidate for candidate in loops
+            if loop_name in loops[candidate]["body"]
+        ]
+        if candidates:
+            parent_loop[loop_name] = max(
+                candidates, key=lambda candidate: len(loops[candidate]["body"])
+            )
+
+    children: dict[str, list[str]] = {name: [] for name in loops}
+    for child, parent in parent_loop.items():
+        children[parent].append(child)
+    top_loops = [name for name in loops if name not in parent_loop]
+    body_nodes: dict[str, set[str]] = {}
+    for loop_name, info in loops.items():
+        nested_nodes = set().union(
+            *(loops[child]["body"] for child in children[loop_name]), set()
+        )
+        body_nodes[loop_name] = info["body"] - nested_nodes
+        if not body_nodes[loop_name]:
+            raise WorkflowError(f"Узел {loop_name}: тело цикла пустое")
+    top_nested_nodes = set().union(
+        *(loops[name]["body"] for name in top_loops), set()
+    )
+    top_order = [name for name in full_order if name not in top_nested_nodes]
+
     folders = _folders(nodes)
     for name in agent_nodes:
         if name in folders:
@@ -498,7 +528,13 @@ def _render_loop_graph(
     loop_aliases: dict[str, str] = {}
     imports: list[str] = []
     full_keys = {name: f"step_{index}" for index, name in enumerate(full_order)}
-    body_keys = {name: f"body_step_{index}" for index, name in enumerate(body_order)}
+    loop_graph_names = {
+        name: "loop_body_graph" if len(loops) == 1
+        else f"loop_body_graph_{index:03d}"
+        for index, name in enumerate(
+            sorted(loops, key=order_index.__getitem__)
+        )
+    }
 
     for index, name in enumerate(full_order):
         if _is_trigger(nodes[name]):
@@ -506,36 +542,38 @@ def _render_loop_graph(
         if nodes[name].get("type") == "n8n-nodes-base.splitInBatches":
             alias = f"_LoopClass_{index}"
             loop_aliases[name] = alias
-            imports.append(
-                f"from operations.loop import Loop as {alias}"
-            )
+            imports.append(f"from operations.loop import Loop as {alias}")
             continue
         folder = folders.get(name)
         if folder is None:
-            raise WorkflowError(f"Узел {name}: не найден каталог сгенерированного модуля.")
+            raise WorkflowError(f"Узел {name}: не удалось определить папку сгенерированного модуля")
         alias = _python_alias(index)
         aliases[name] = alias
         imports.append(
             f"from {folder}.{module_names[name]} import run_node as {alias}"
         )
 
-    def node_call(name: str, key: str, indent: str, inside_loop: bool = False) -> list[str]:
+    def node_call(
+        name: str, key: str, indent: str, *, inside_loop: bool = False
+    ) -> list[str]:
         node = nodes[name]
         kind = node["type"]
         input_nodes = [(edge.source, edge.output) for edge in parents[name]]
         if kind == "n8n-nodes-base.splitInBatches":
-            settings = loop_info["settings"]
+            info = loops[name]
+            settings = info["settings"]
             verified = generate_loop_node(compatible_node(node))
             manual_parameters = manual_parameter_payload(node) or None
-            feedback = loop_info["feedback"]
+            feedback = info["feedback"]
             arguments = [
                 f"{name!r}, {loop_aliases[name]}, {input_nodes!r},",
                 f"{settings.loop_output}, {settings.done_output!r}, {settings.output_count},",
-                "loop_body_graph,",
+                f"{loop_graph_names[name]},",
                 f"{feedback.source!r}, {feedback.output},",
                 f"{verified.batch_size}, {verified.reset!r}, {verified.execute_once!r},",
                 f"{verified.retry_on_fail!r}, {verified.max_tries}, {verified.wait_between_tries!r},",
-                f"linked_items={bool(linked_names)!r}, manual_parameters={manual_parameters!r}",
+                f"linked_items={bool(linked_names)!r}, manual_parameters={manual_parameters!r},",
+                f"inside_loop={inside_loop!r}",
             ]
             return [
                 f"{indent}builder.add_node({key!r}, _logged_step({name!r}, _make_loop_node(",
@@ -545,7 +583,7 @@ def _render_loop_graph(
 
         runner = "None" if _is_trigger(node) else aliases.get(name)
         if runner is None and not _is_trigger(node):
-            raise WorkflowError(f"Узел {name}: не найден модуль сгенерированной функции.")
+            raise WorkflowError(f"Узел {name}: не удалось найти сгенерированную функцию.")
         output_count = 2 if kind == "n8n-nodes-base.if" else 1
         if kind == "n8n-nodes-base.switch":
             rules = node.get("parameters", {}).get("rules", {}).get("values", [])
@@ -564,35 +602,60 @@ def _render_loop_graph(
     def edges_for(keys: list[str], indent: str) -> list[str]:
         if not keys:
             return []
-        result = [f"{indent}builder.add_edge(START, {keys[0]!r})"]
-        result.extend(
+        lines = [f"{indent}builder.add_edge(START, {keys[0]!r})"]
+        lines.extend(
             f"{indent}builder.add_edge({source!r}, {target!r})"
             for source, target in zip(keys, keys[1:], strict=False)
         )
-        result.append(f"{indent}builder.add_edge({keys[-1]!r}, END)")
-        return result
+        lines.append(f"{indent}builder.add_edge({keys[-1]!r}, END)")
+        return lines
 
-    body_lines = [
-        "def _build_loop_body_graph():",
-        "    builder = StateGraph(WorkflowState)",
-    ]
-    for name in body_order:
-        body_lines.extend(node_call(name, body_keys[name], "    ", inside_loop=True))
-    body_lines.extend(edges_for([body_keys[name] for name in body_order], "    "))
-    body_lines.extend(["    return builder.compile()", "", "loop_body_graph = _build_loop_body_graph()"])
+    graph_definitions: list[str] = []
+    for loop_name in sorted(loops, key=order_index.__getitem__):
+        graph_name = loop_graph_names[loop_name]
+        names = [name for name in full_order if name in body_nodes[loop_name]]
+        body_prefix = "body_step" if len(loops) == 1 else f"body_{order_index[loop_name]}_step"
+        body_keys = {
+            name: f"{body_prefix}_{index}" for index, name in enumerate(names)
+        }
+        lines = [
+            f"def _build_{graph_name}():",
+            "    builder = StateGraph(WorkflowState)",
+        ]
+        for name in names:
+            lines.extend(
+                node_call(name, body_keys[name], "    ", inside_loop=True)
+            )
+        lines.extend(edges_for([body_keys[name] for name in names], "    "))
+        lines.append("    return builder.compile()")
+        graph_definitions.extend(lines)
+        graph_definitions.append("")
+
+    build_order = sorted(
+        loops,
+        key=lambda name: (
+            -sum(1 for ancestor in loops if name in loops[ancestor]["body"]),
+            order_index[name],
+        ),
+    )
+    graph_definitions.extend(
+        f"{loop_graph_names[name]} = _build_{loop_graph_names[name]}()"
+        for name in build_order
+    )
 
     graph_lines = [
         "def _build_graph():",
         "    builder = StateGraph(WorkflowState)",
     ]
-    for name in outer_order:
+    for name in top_order:
         graph_lines.extend(node_call(name, full_keys[name], "    "))
-    graph_lines.extend(edges_for([full_keys[name] for name in outer_order], "    "))
+    graph_lines.extend(edges_for([full_keys[name] for name in top_order], "    "))
     graph_lines.extend(["    return builder.compile()", "", "workflow_graph = _build_graph()"])
 
-    outgoing = {name: 0 for name in nodes}
-    for edge in [*main_edges, loop_info["feedback"]]:
-        outgoing[edge.source] = outgoing.get(edge.source, 0) + 1
+    outgoing = {name: 0 for name in full_order}
+    for edge in [*main_edges, *(info["feedback"] for info in loops.values())]:
+        outgoing[edge.source] += 1
+    all_body_nodes = set().union(*(info["body"] for info in loops.values()), set())
     terminal_nodes = [
         name
         for name in full_order
@@ -600,18 +663,24 @@ def _render_loop_graph(
         and nodes[name].get("type") not in {"n8n-nodes-base.if", "n8n-nodes-base.switch"}
         and not _is_trigger(nodes[name])
     ]
-    terminal = " + ".join(
-        f"state['outputs'].get({name!r}, [[]])[0]" for name in terminal_nodes
-    ) or f"state['results'].get({loop_info['name']!r}, [])"
+    terminal_values = [
+        f"state['results'].get({name!r}, [])" if name in all_body_nodes
+        else f"state['outputs'].get({name!r}, [[]])[0]"
+        for name in terminal_nodes
+    ]
+    terminal = " + ".join(terminal_values)
+    if not terminal:
+        last_loop = max(loops, key=order_index.__getitem__)
+        terminal = f"state['results'].get({last_loop!r}, [])"
     if linked_names:
         terminal = f"_clean_items({terminal})"
 
     source = (
-        '"""Точка ручного запуска workflow через LangGraph."""\n\n'
+        '"""Сгенерированный runner workflow на LangGraph."""\n\n'
         "import asyncio\nimport logging\nimport sys\nimport uuid\n"
         "from copy import deepcopy\nfrom typing import Any, TypedDict\n\n"
         "from langgraph.graph import END, START, StateGraph\n\n"
-        + "\n".join(imports)
+        + "\n".join(dict.fromkeys(imports))
         + "\n\nclass WorkflowState(TypedDict, total=False):\n"
         + "    input_data: list[dict[str, Any]]\n"
         + "    execution: dict[str, str]\n"
@@ -620,11 +689,11 @@ def _render_loop_graph(
         + "    loop_runtime: Any\n\n"
         + _runtime_source()
         + "\n\n"
-        + "\n".join(body_lines)
+        + "\n".join(graph_definitions)
         + "\n\n"
         + "\n".join(graph_lines)
         + "\n\nasync def run_async(input_data=None):\n"
-        + '    """Запустить граф и вернуть данные конечных узлов."""\n'
+        + '    """Выполнить граф и вернуть выходные элементы workflow."""\n'
         + f"    logging.info('Workflow «%s»: запуск', {str(workflow.get('name') or 'без имени')!r})\n"
         + '    items = input_data if input_data is not None else [{"json": {}}]\n'
         + "    if isinstance(items, dict):\n        items = [items]\n"
@@ -638,7 +707,7 @@ def _render_loop_graph(
         + "    logging.info('Workflow завершён; выходных элементов: %d', len(result))\n"
         + "    return result\n\n\n"
         + "def run(input_data=None):\n"
-        + '    """Синхронная обёртка для запуска асинхронного графа."""\n'
+        + '    """Запустить workflow из обычного синхронного Python-кода."""\n'
         + '    if sys.platform == "win32":\n'
         + "        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:\n"
         + "            return runner.run(run_async(input_data))\n"
@@ -649,7 +718,7 @@ def _render_loop_graph(
         + "    try:\n"
         + "        run()\n"
         + "    except Exception as exc:\n"
-        + "        logging.error('Workflow остановлен с ошибкой: %s', exc)\n"
+        + "        logging.error('Workflow завершился с ошибкой: %s', exc)\n"
         + "        raise SystemExit(1) from None\n"
     )
     return source

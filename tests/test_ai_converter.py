@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import copy
 import sys
 from types import SimpleNamespace
 
@@ -118,6 +119,51 @@ def test_generator_connects_model_without_executing_it(tmp_path):
     assert 'https://openrouter.ai/api/v1/chat/completions' in config
     assert len(list((output / "ai_nodes").glob("ai_agent_analyze_csv.py"))) == 1
     assert "config.OPENROUTER_CHAT_MODEL_API_URL" in (output / "ai_nodes" / "ai_agent_analyze_csv.py").read_text(encoding="utf-8")
+
+
+def test_one_chat_model_can_be_reused_by_multiple_agents(tmp_path):
+    first_agent = agent_node()
+    second_agent = copy.deepcopy(first_agent)
+    second_agent["id"] = "agent-2"
+    second_agent["name"] = "AI Agent - Summarize"
+    second_agent["parameters"]["text"] = "={{ $json.output }}"
+    first_agent["parameters"]["text"] = "Analyze the incoming item."
+    model = model_node()
+    source = {
+        "id": "source",
+        "name": "Input",
+        "type": "n8n-nodes-base.code",
+        "parameters": {
+            "language": "pythonNative",
+            "pythonCode": 'return [{"json": {"csv_text": "data"}}]',
+        },
+    }
+    workflow = {
+        "nodes": [source, first_agent, second_agent, model],
+        "connections": {
+            "Input": {"main": [[{"node": first_agent["name"], "type": "main", "index": 0}]]},
+            first_agent["name"]: {"main": [[{"node": second_agent["name"], "type": "main", "index": 0}]]},
+            model["name"]: {"ai_languageModel": [[
+                {"node": first_agent["name"], "type": "ai_languageModel", "index": 0},
+                {"node": second_agent["name"], "type": "ai_languageModel", "index": 0},
+            ]]},
+        },
+    }
+    output = tmp_path / "shared-model"
+
+    files = generate_project(workflow, output)
+
+    assert "ai_nodes/ai_agent_analyze_csv.py" in files
+    assert "ai_nodes/ai_agent_summarize.py" in files
+    assert files["main.py"].count("_run_logged_node(") >= 2
+    assert "OPENROUTER_CHAT_MODEL_API_KEY" in files["config.py"]
+
+    langgraph_files = generate_project(
+        workflow, tmp_path / "shared-model-langgraph", langgraph=True
+    )
+    assert "ai_nodes/ai_agent_analyze_csv.py" in langgraph_files
+    assert "ai_nodes/ai_agent_summarize.py" in langgraph_files
+    assert "langgraph>=1.0" in langgraph_files["requirements.txt"]
 
 
 def test_generator_accepts_unrecognized_provider_with_node_endpoint(tmp_path):
