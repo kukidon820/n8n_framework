@@ -14,10 +14,14 @@
     uv run n8n-transcriper inspect workflow.json
     uv run n8n-transcriper validate workflow.json
     uv run n8n-transcriper convert workflow.json --out generated
+    uv run n8n-transcriper validate workflow.json --langgraph
+    uv run n8n-transcriper convert workflow.json --out generated --langgraph
 
 <code>inspect</code> читает workflow и выводит его узлы. <code>validate</code> проверяет JSON, граф, поддержку параметров и expressions, а также синтаксис сгенерированных модулей, не сохраняя проект. Проверка продолжается по workflow, чтобы показать накопленные ошибки; блокирующие ошибки дают ненулевой код завершения.
 
 <code>convert</code> записывает проект, даже если часть workflow не переносится. Для поддерживаемого типа с неизвестным параметром, режимом или expression создаётся TODO-функция, которая завершится с <code>NotImplementedError</code>, пока её не реализуют вручную. Неизвестный тип узла или соединения и отсутствующая обязательная ссылка на credentials могут привести к пропуску узла; итоговые пропуски и упрощённые связи перечисляются в generated README и <code>conversion_report.md</code>.
+
+Флаг <code>--langgraph</code> задаётся отдельно для <code>convert</code> и <code>validate</code>. В обычном режиме HTTP Request всегда конвертируется как HTTP-узел; только с этим флагом детектор может заменить подходящий POST JSON-запрос к модели на LangGraph-агента. Режим добавляет нужные LangChain-пакеты только в generated-проект. Детектор провайдеров и точные ограничения приведены в [справочнике](supported-nodes.md#http-запросы-к-модели-в-режиме-langgraph).
 
 Триггеры не исполняются и не входят в граф ручного запуска; проверка не требует ставить их первыми. Их имя, тип и параметры можно посмотреть в README сгенерированного проекта.
 
@@ -28,6 +32,8 @@
     uv run python convert.py workflow.json --out generated
 
 После конвертации проверьте <code>conversion_report.md</code> и README сгенерированного проекта. Упрощённые связи через пропущенные узлы могут изменить данные, поступающие в соседние шаги.
+
+Конвертер пишет этапы работы и итог по узлам в консоль. Generated <code>main.py</code> сообщает о начале и завершении workflow и узлов; при ошибке пишет имя узла и исходную причину, затем передаёт исключение вызывающему коду.
 
 ## Запуск generated-проекта
 
