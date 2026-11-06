@@ -83,3 +83,26 @@ Linux/macOS:
 Конвертер узла находится в <code>src/n8n_transcriper/converters/</code>. Генератор выбирает converter по типу узла в <code>generator.py</code>; проверки workflow и CLI находятся в <code>reader.py</code>, <code>graph.py</code> и <code>cli.py</code>. Список реализованных параметров и ограничений ведётся в [справочнике узлов](supported-nodes.md).
 
 При изменении поддержки обновляйте документацию и проверки на соответствующий converter. Неподдерживаемые параметры должны давать конкретную диагностику с именем узла и путём параметра, а не незаметно теряться.
+
+## Добавление AI-провайдера
+
+Распознавание HTTP-вызовов моделей и создание агентов включены только с флагом <code>--langgraph</code>. Обычный режим конвертации менять для нового провайдера не нужно.
+
+### Быстрый путь: OpenAI-совместимый API
+
+Если провайдер принимает Chat Completions запросы OpenAI, отдельный адаптер обычно не нужен. В n8n задайте HTTP Request с методом <code>POST</code>, JSON-телом с полем <code>model</code>, массивом <code>messages</code> с ролями и хотя бы одним параметром генерации, например <code>temperature</code> или <code>max_tokens</code>. Для собственного домена детектор распознаёт такую структуру независимо от URL. Ответ должен содержать <code>choices[0].message.content</code>. При конвертации с <code>--langgraph</code> URL и ключ попадут в настройки generated-проекта; секрет задавайте через его config или переменную окружения.
+
+Проверьте такой workflow командой <code>uv run n8n-transcriper validate workflow.json --langgraph</code>. Если используется n8n AI Agent, подключите модель с OpenAI-совместимыми настройками API URL, model и ключа. Поддерживаются только поля запроса и ответа, указанные в [разделе про HTTP-модели](supported-nodes.md#http-запросы-к-модели-в-режиме-langgraph).
+
+### Полноценная поддержка собственного API
+
+Если формат запроса или ответа отличается от существующих адаптеров, добавьте провайдера в LangGraph-часть:
+
+1. В <code>src/n8n_transcriper/langgraph_mode/providers.py</code> добавьте <code>ProviderEndpoint</code> с точными host, путём и названием операции. Совпадение должно учитывать host и путь, а не только похожий фрагмент URL.
+2. В <code>detection.py</code> опишите признаки JSON-тела для этой операции. Для известного endpoint проверьте, что структура соответствует API. Для произвольного endpoint требуйте сочетание признаков модели, prompt/messages и параметров генерации; одного массива <code>messages</code> недостаточно.
+3. В <code>agent_generation.py</code> добавьте имя пакета в <code>_MODEL_PACKAGES</code> и класс модели в <code>_MODEL_CLASSES</code>. При необходимости задайте базовый URL в <code>_PROVIDER_DEFAULTS</code>, способ создать модель в <code>_model_constructor</code>, допустимые параметры в <code>_model_options</code>, заголовок авторизации и разбор ответа в <code>_response_body</code>. Для нестандартной операции используйте отдельный генератор адаптера, как для Gemini Interactions.
+4. Для узла AI Model проверьте выбор провайдера в <code>_provider_for_model</code>. Добавьте соответствие пакету зависимости в <code>src/n8n_transcriper/generator.py::_langchain_package</code>, если для нового провайдера нужен новый LangChain-пакет. Не записывайте реальные ключи в сгенерированный код: генерируйте конфигурацию или переменные окружения.
+5. Добавьте тесты обнаружения в <code>tests/test_langgraph_detection.py</code>, генерации HTTP-адаптера в <code>tests/test_langgraph_generation.py</code> и n8n AI Agent/Model в <code>tests/test_langgraph_ai_agents.py</code>. Проверьте и положительный пример, и похожее обычное API, которое не должно быть принято за AI.
+6. Обновите [справочник узлов](supported-nodes.md) и [ограничения](limitations.md), затем запустите <code>uv run pytest</code>.
+
+Повторно используйте существующий адаптер, если протокол и формат ответа совпадают. Новый endpoint с тем же протоколом требует регистрации адреса и проверок тела; новая схема API требует отдельной генерации, настройки авторизации, параметров и разбора ответа.

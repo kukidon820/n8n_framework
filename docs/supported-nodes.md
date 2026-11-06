@@ -365,6 +365,8 @@ AI-соединения <code>ai_tool</code>, <code>ai_memory</code> и друг
 
 Отдельные <code>queryParameters</code> n8n не переносятся. Query-часть URL собственного endpoint сохраняется, кроме имён параметров, похожих на секреты; для известных API формируется базовый URL провайдера.
 
+Чтобы добавить провайдера с другим протоколом, используйте [инструкцию разработчика](development.md#добавление-ai-провайдера). OpenAI-совместимый endpoint обычно можно подключить без изменения конвертера, если он соответствует перечисленной выше форме запроса и ответа.
+
 ## Data Table
 
 Тип: <code>n8n-nodes-base.dataTable</code>. Поддерживается только ресурс <code>row</code>. В интерфейсе выберите операции Insert, Get, Update, Upsert или Delete; в JSON Delete обычно экспортируется как <code>deleteRows</code>, также принимается alias <code>delete</code>.
