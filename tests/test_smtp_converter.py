@@ -5,6 +5,7 @@
 
 import asyncio
 import base64
+import hashlib
 import sys
 from email.message import EmailMessage
 from email.policy import SMTP as SMTP_POLICY
@@ -207,7 +208,7 @@ def test_email_send_rejects_unknown_options_and_missing_credentials():
         generate_email_send_node(node, "send_email")
 
 
-def test_email_send_nodes_with_multiple_smtp_credentials_are_reported_and_skipped(tmp_path):
+def test_email_send_nodes_with_multiple_smtp_credentials_get_separate_profiles(tmp_path):
     first = email_send_node()
     second = email_send_node()
     second["id"] = "email-send-2"
@@ -222,10 +223,16 @@ def test_email_send_nodes_with_multiple_smtp_credentials_are_reported_and_skippe
 
     output = tmp_path / "generated"
     files = generate_project(workflow, output)
-    assert (output / "main.py").exists()
-    assert "несколько SMTP credentials" in files["main.py"]
-    assert "Send Email 2" in files["main.py"]
+    first_profile = "SMTP_" + hashlib.sha256(b"smtp-1").hexdigest()[:8].upper()
+    second_profile = "SMTP_" + hashlib.sha256(b"smtp-account-2").hexdigest()[:8].upper()
+    config = files["config.py"]
 
+    assert (output / "main.py").exists()
+    assert f'{first_profile}_HOST = os.getenv("{first_profile}_HOST", "")' in config
+    assert f'{second_profile}_HOST = os.getenv("{second_profile}_HOST", "")' in config
+    assert f"config.{first_profile}_HOST" in files["email_senders/send_email.py"]
+    assert f"config.{second_profile}_HOST" in files["email_senders/send_email_2.py"]
+    assert "Send Email 2" in files["main.py"]
 
 def test_gmail_send_endpoint_generates_smtp_config_and_sender(tmp_path, monkeypatch):
     node = gmail_send_node()

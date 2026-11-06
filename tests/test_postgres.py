@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import hashlib
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -58,6 +59,29 @@ def test_generator_adds_database_config(tmp_path):
     assert "POSTGRES_PASSWORD" in (output / "config.py").read_text(encoding="utf-8")
     assert "psycopg[binary]" in (output / "requirements.txt").read_text(encoding="utf-8")
     assert (output / "database" / "postgres.py").exists()
+
+
+def test_generator_supports_multiple_postgres_credentials(tmp_path):
+    first = postgres_node()
+    second = postgres_node()
+    second["id"] = "db-2"
+    second["name"] = "Get orders"
+    second["credentials"]["postgres"] = {"id": "two", "name": "Orders database"}
+    workflow = {
+        "nodes": [first, second],
+        "connections": {
+            "Get users": {"main": [[{"node": "Get orders", "type": "main", "index": 0}]]},
+        },
+    }
+
+    files = generate_project(workflow, tmp_path / "multiple-postgres")
+    first_profile = "POSTGRES_" + hashlib.sha256(b"one").hexdigest()[:8].upper()
+    second_profile = "POSTGRES_" + hashlib.sha256(b"two").hexdigest()[:8].upper()
+
+    assert f'{first_profile}_HOST = os.getenv("{first_profile}_HOST", "")' in files["config.py"]
+    assert f'{second_profile}_HOST = os.getenv("{second_profile}_HOST", "")' in files["config.py"]
+    assert f"connect(30, '{first_profile}')" in files["database/get_users.py"]
+    assert f"connect(30, '{second_profile}')" in files["database/get_orders.py"]
 
 
 def test_unsafe_query_and_unsupported_batching_fail():

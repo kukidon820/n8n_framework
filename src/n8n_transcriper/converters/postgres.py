@@ -20,7 +20,7 @@ from psycopg.rows import dict_row
 import config
 
 
-async def connect(timeout):
+async def connect(timeout, profile="POSTGRES"):
     """Открыть async-соединение psycopg с credentials из config.py.
 
     Словарный row_factory возвращает результаты в форме, удобной для JSON items.
@@ -28,14 +28,19 @@ async def connect(timeout):
     откатывает транзакцию в зависимости от результата блока.
     """
     return await AsyncConnection.connect(
-        host=config.POSTGRES_HOST, port=config.POSTGRES_PORT,
-        dbname=config.POSTGRES_DATABASE, user=config.POSTGRES_USER,
-        password=config.POSTGRES_PASSWORD, connect_timeout=timeout, row_factory=dict_row,
+        host=getattr(config, f"{profile}_HOST"),
+        port=getattr(config, f"{profile}_PORT"),
+        dbname=getattr(config, f"{profile}_DATABASE"),
+        user=getattr(config, f"{profile}_USER"),
+        password=getattr(config, f"{profile}_PASSWORD"),
+        connect_timeout=timeout, row_factory=dict_row,
     )
 '''
 
 
-def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[str, set[str]]:
+def generate_postgres_node(
+    node: dict[str, Any], function_name: str, config_prefix: str = "POSTGRES"
+) -> tuple[str, set[str]]:
     """Сгенерировать SQL-функцию и зависимости параметров от предыдущих узлов.
 
     Текст запроса проверяется до генерации, а значения из queryReplacement
@@ -96,14 +101,19 @@ def generate_postgres_node(node: dict[str, Any], function_name: str) -> tuple[st
     parameter_code = textwrap.dedent(parameter_code)
     parameter_code = textwrap.indent(parameter_code, "    ") if parameter_code else ""
     # В transaction все items используют одно соединение и общую транзакцию.
+    connect_arguments = (
+        f"{timeout!r}, {config_prefix!r}"
+        if config_prefix != "POSTGRES"
+        else repr(timeout)
+    )
     if options["queryBatching"] == "transaction":
-        run_body = f'''    async with await connect({timeout!r}) as conn:
+        run_body = f'''    async with await connect({connect_arguments}) as conn:
         for item in items:
             output.extend(await execute_one(conn, item, items, results, execution))
 '''
     else:
         run_body = f'''    for item in items:
-        async with await connect({timeout!r}) as conn:
+        async with await connect({connect_arguments}) as conn:
             output.extend(await execute_one(conn, item, items, results, execution))
 '''
     source = f'''import json

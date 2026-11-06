@@ -22,6 +22,60 @@ def _code_node(name: str, code: str) -> dict[str, object]:
     }
 
 
+def _loop_node(name: str) -> dict[str, object]:
+    return {
+        "id": name,
+        "name": name,
+        "type": "n8n-nodes-base.splitInBatches",
+        "typeVersion": 3,
+        "parameters": {"batchSize": 2, "options": {"reset": False}},
+    }
+
+
+def _sequential_loops_workflow() -> dict[str, object]:
+    return {
+        "nodes": [
+            {"id": "start", "name": "Start", "type": "n8n-nodes-base.manualTrigger", "parameters": {}},
+            _code_node("Build", 'return [{"json": {"value": value}} for value in range(5)]'),
+            _loop_node("First Loop"),
+            _code_node("Increment", 'return [{"json": {"value": item["json"]["value"] + 1}} for item in _items]'),
+            _loop_node("Second Loop"),
+            _code_node("Add Ten", 'return [{"json": {"value": item["json"]["value"] + 10}} for item in _items]'),
+            _code_node("Finish", "return _items"),
+        ],
+        "connections": {
+            "Start": {"main": [[_link("Build")]]},
+            "Build": {"main": [[_link("First Loop")]]},
+            "First Loop": {"main": [[_link("Second Loop")], [_link("Increment")]]},
+            "Increment": {"main": [[_link("First Loop")]]},
+            "Second Loop": {"main": [[_link("Finish")], [_link("Add Ten")]]},
+            "Add Ten": {"main": [[_link("Second Loop")]]},
+        },
+    }
+
+
+def _nested_loops_workflow() -> dict[str, object]:
+    workflow = _sequential_loops_workflow()
+    workflow["nodes"] = [
+        {"id": "start", "name": "Start", "type": "n8n-nodes-base.manualTrigger", "parameters": {}},
+        _code_node("Build", 'return [{"json": {"value": value}} for value in (1, 2)]'),
+        {**_loop_node("Outer Loop"), "parameters": {"batchSize": 1, "options": {"reset": False}}},
+        {**_loop_node("Inner Loop"), "parameters": {"batchSize": 1, "options": {"reset": False}}},
+        _code_node("Multiply", 'return [{"json": {"value": item["json"]["value"] * 10}} for item in _items]'),
+        _code_node("Outer Feedback", "return _items"),
+        _code_node("Finish", "return _items"),
+    ]
+    workflow["connections"] = {
+        "Start": {"main": [[_link("Build")]]},
+        "Build": {"main": [[_link("Outer Loop")]]},
+        "Outer Loop": {"main": [[_link("Finish")], [_link("Inner Loop")]]},
+        "Inner Loop": {"main": [[_link("Outer Feedback")], [_link("Multiply")]]},
+        "Multiply": {"main": [[_link("Inner Loop")]]},
+        "Outer Feedback": {"main": [[_link("Outer Loop")]]},
+    }
+    return workflow
+
+
 def _run_generated(output, items, *, include_stdout=False):
     langgraph_package = output / "langgraph"
     langgraph_package.mkdir(exist_ok=True)
@@ -216,4 +270,23 @@ def test_langgraph_loop_mode_compiles_loop_body_as_nested_graph(tmp_path):
         {"json": {"value": 3}},
         {"json": {"value": 4}},
         {"json": {"value": 5}},
+    ]
+
+
+def test_langgraph_mode_runs_sequential_loops(tmp_path):
+    output = tmp_path / "generated-sequential-loops"
+    generate_project(_sequential_loops_workflow(), output, langgraph=True)
+
+    assert _run_generated(output, None) == [
+        {"json": {"value": value}} for value in range(11, 16)
+    ]
+
+
+def test_langgraph_mode_runs_nested_loops(tmp_path):
+    output = tmp_path / "generated-nested-loops"
+    generate_project(_nested_loops_workflow(), output, langgraph=True)
+
+    assert _run_generated(output, None) == [
+        {"json": {"value": 10}},
+        {"json": {"value": 20}},
     ]
